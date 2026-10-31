@@ -7,7 +7,7 @@ import time
 import uuid as uuidlib
 
 from claude.errors import Refusal
-from claude.registry import TERMINAL, claude_alive, enqueue, find_run, read_meta, reap, record_if_active, registry_args, resolve_runs_dir, supervisor_alive, update_meta
+from claude.registry import TERMINAL, claude_alive, enqueue, find_run, is_live, read_meta, reap, record_if_active, registry_args, resolve_runs_dir, supervisor_alive, update_meta
 from claude.util import invocation, now, process_command, timings
 
 from .create import create_run, default_cwd, refuse_inside_worker, start_reply
@@ -65,6 +65,12 @@ def send_instead(run_id, meta, runs_dir):
     if state == "finishing":
         return {"instead": invocation("result", "--run", run_id, "--wait", *extra), "or": f"{invocation('stop', '--run', run_id, *extra)}, then resume", "why": "the answer is already in and stdin is closed"}
     if state in TERMINAL and not claude_alive(meta):
+        # A newer run of the same session may be live; resume would be refused for it, so point at that run instead.
+        newest = reap(find_run(runs_dir, meta["session_id"])) if meta.get("session_id") else meta
+        if newest.get("run_id") != run_id and is_live(newest):
+            if newest.get("state") in ("starting", "running") and newest.get("stdin_open") and supervisor_alive(newest):
+                return {"instead": invocation("send", newest["run_id"], "<message>", *extra), "why": f"run {run_id} has ended, but its session goes on in the live run {newest['run_id']}"}
+            return send_instead(newest["run_id"], newest, runs_dir)
         return {"instead": invocation("resume", run_id, "<message>", *extra), "why": "the run has ended; resume continues its session"}
     return {"instead": f"{invocation('stop', '--run', run_id, *extra)}, then resume", "why": "the run's supervisor is gone or its stdin is closed"}
 

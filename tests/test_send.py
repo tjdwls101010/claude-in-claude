@@ -72,6 +72,15 @@ class Send(Sandbox):
         self.assertIn(f"resume {reply['run_id']}", refusal["instead"])
         self.assertNotIn(" send ", refusal["instead"])
 
+    def test_send_to_an_older_run_points_at_the_sessions_live_run(self):
+        first = self.start("x")
+        self.wait_state(first["run_id"])
+        second = self.cli_json("resume", first["run_id"], "again [[fake:sleep:10]]")
+        refusal = self.cli_json("send", first["run_id"], "more", expect=1)
+        self.assertIn(f"send {second['run_id']}", refusal["instead"])
+        self.assertNotIn(" resume ", refusal["instead"])
+        self.cli_json("stop", "--run", second["run_id"])
+
     def test_finishing_run_refusals_do_not_point_at_each_other(self):
         reply = self.start("x [[fake:reply:done]] [[fake:linger:8]]")
         self.wait_state(reply["run_id"], states=("finishing",))
