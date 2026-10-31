@@ -128,7 +128,11 @@ if "-p" in sys.argv and sys.argv[-1] == "/usage":
     if os.environ.get("FAKE_CLAUDE_USAGE") == "fail":
         print("usage unavailable", file=sys.stderr)
         sys.exit(1)
-    sys.stdout.write((FIXTURES / "usage.jsonl").read_text())
+    if flag("--output-format") == "stream-json" and "--verbose" in sys.argv:
+        sys.stdout.write((FIXTURES / "usage.jsonl").read_text())
+    else:
+        # Without stream-json the real CLI prints the report as text, with no structured usage_report.
+        print("Current session: 31% used\nCurrent week (all models): 47% used")
     sys.exit(0)
 if "-p" not in sys.argv:
     print("fake claude: only -p, --version and auth status", file=sys.stderr)

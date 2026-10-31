@@ -57,6 +57,19 @@ class Doctor(Sandbox):
         self.assertTrue(any("excludedCommands" in w for w in d["warnings"]))
         self.assertEqual([x["setting"] for x in d["profile_exceptions"]["read-only"]], ["sandbox.excludedCommands"])
 
+    def test_registry_that_does_not_exist_yet(self):
+        d = self.cli_json("doctor", "--runs-dir", str(self.root / "nope" / "a" / "b"), timeout=120)
+        self.assertTrue(d["ok"], d["blockers"])
+        self.assertTrue(d["registry"]["writable"])
+
+    def test_worktrees_are_credited_to_their_own_group(self):
+        for name in ("fix", "fix-db"):
+            reply = self.cli_json("batch", "--group", name, "--worktree", "--task", "x", timeout=120)
+            self.wait_state(reply["runs"][0]["run_id"])
+        for seed in ("0", "2", "3"):
+            d = self.doctor(env={"PYTHONHASHSEED": seed})
+            self.assertEqual(sorted((w["path"].rsplit("/", 1)[1], w["group"]) for w in d["registry"]["worktrees"]), [("fix-1", "fix"), ("fix-db-1", "fix-db")], seed)
+
     def test_registry_live_runs_and_worktrees(self):
         live = self.start("x [[fake:sleep:30]]")
         git(self.project, "worktree", "add", "-q", "-b", "worktree-old-1", str(self.project / ".claude" / "worktrees" / "old-1"))

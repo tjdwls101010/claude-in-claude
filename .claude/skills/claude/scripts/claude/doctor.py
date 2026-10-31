@@ -46,21 +46,25 @@ def doctor(*, cwd, runs_dir=None):
                 warnings.append(f"{item['kind']} limit at {item['percent']}% (resets {item['resets_at']}); every worker draws on it")
     registry = resolve_runs_dir(cwd, runs_dir)
     reg = {"path": registry, "exists": os.path.isdir(registry)}
-    probe = Path(registry) if reg["exists"] else Path(registry).parent
+    # Run commands create the registry with its missing parents, so what must be writable is the nearest folder that exists.
+    probe = Path(registry)
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
     reg["writable"] = os.access(probe, os.W_OK)
     if not reg["writable"]:
         blockers.append(f"the registry {registry} cannot be written")
     reg["live_runs"] = [m.get("run_id") for _, m in live_runs(registry)] if reg["exists"] else []
-    reg["groups"] = [g["name"] for g in list_groups(registry)] if reg["exists"] else []
+    groups = list_groups(registry) if reg["exists"] else []
+    reg["groups"] = [g["name"] for g in groups]
+    # A worktree belongs to the group whose manifest records its exact path; names alone are ambiguous (fix-1 against fix-db-1).
+    owner = {os.path.realpath((m.get("worktree") or {}).get("path") or ""): g["name"] for g in groups for m in g.get("members") or [] if (m.get("worktree") or {}).get("path")}
     repo = main_checkout(cwd)
-    reserved = {f"{g}-" for g in reg["groups"]}
     leftover = []
     if repo:
         for e in worktree_entries(repo):
             path = e["path"]
             if "/.claude/worktrees/" in path:
-                name = path.rsplit("/", 1)[-1]
-                leftover.append({"path": path, "branch": e["branch"], "group": next((g[:-1] for g in reserved if name.startswith(g)), None)})
+                leftover.append({"path": path, "branch": e["branch"], "group": owner.get(os.path.realpath(path))})
     reg["worktrees"] = leftover
     top = toplevel(cwd) or str(Path(cwd).resolve())
     roots = [r for r in {toplevel(cwd), repo} if r]
