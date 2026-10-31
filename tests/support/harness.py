@@ -56,6 +56,15 @@ def engine(unit):
     return types.SimpleNamespace(**{n: getattr(module, n) for n in names})
 
 
+def build_parser():
+    """The CLI's argparse parser, from `cli.build_parser` in the scripts under test — the one name of cli.py tests may use."""
+    _load_package()
+    spec = importlib.util.spec_from_file_location("claude_skill_cli", ENTRY)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.build_parser()
+
+
 def git(cwd, *args, check=True):
     proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
     if check and proc.returncode:
