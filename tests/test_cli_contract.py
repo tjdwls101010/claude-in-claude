@@ -51,7 +51,7 @@ class Help(unittest.TestCase):
 
     def test_paragraphs_are_not_rewrapped(self):
         out = subcommand_help("status")
-        self.assertIn("\n  stalled      starting or running with no event for 600 s; advisory, nothing is killed — read `in_progress` beside it\n", out)
+        self.assertIn("\n  stalled      starting, running or finishing with no event for 600 s; advisory, nothing is killed — read `in_progress` beside it\n", out)
         start = subcommand_help("start")
         self.assertIn("  read-only  reads anything, and runs any shell command inside a sandbox that can write only its TMPDIR and ~/.cache", start)
 

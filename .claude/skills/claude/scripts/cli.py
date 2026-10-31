@@ -58,7 +58,7 @@ States:
   starting     published; claude has not reported its init
   running      claude has the turn
   retrying     running, and the last event is an API retry (`retrying_since` says since when)
-  stalled      starting or running with no event for {STALL_SECONDS} s; advisory, nothing is killed — read `in_progress` beside it
+  stalled      starting, running or finishing with no event for {STALL_SECONDS} s; advisory, nothing is killed — read `in_progress` beside it
   finishing    the answer is in and stdin is closed, but claude is still running something
   completed    ended: the last answer succeeded
   failed       ended: claude exited non-zero, the answer is an error, or a hook ended the only message (`error` says which)
@@ -74,7 +74,7 @@ Exits: 0 printed; 1 refused — no such run; 2 the command line must change — 
 
 RESULT_DESC = """\
 What a run concluded: at once (partial while it is live), or with --wait once it ends or needs attention.
-Prints: a JSON header line — `run_id`, `session_id`, `state`, `exit_code`, `error`, `attention`, `answered` (the messages the answer replies to), `unanswered`, `last_message_unanswered`, `answer_unconfirmed` (claude did not say which message it answered), `blocked_by_hook`, `last_message_blocked`, `possibly_blocked`, `permission_denials`, `files_edited`, `files_edited_note`, `tool_calls`, `usage`, `cost_usd`, `followups` (background follow-up turns, not the answer), `mode_mismatch`, `profile_exceptions`, `message_bytes`, and `note` and `next` while the run is live — then the final message. A --schema run prints one indented JSON document instead, whose `json` is the structured output (null while live).
+Prints: a JSON header line — `run_id`, `session_id`, `state`, `exit_code`, `error`, `attention`, `answered` (the messages the answer replies to), `unanswered`, `last_message_unanswered`, `answer_unconfirmed` (claude did not say which message it answered), `blocked_by_hook`, `last_message_blocked`, `possibly_blocked`, `permission_denials`, `files_edited`, `files_edited_note`, `tool_calls`, `usage`, `cost_usd`, `followups` (background follow-up turns, not the answer), `mode_mismatch`, `profile_exceptions`, `message_bytes`, and `note` and `next` while the run is live — then the final message. A --schema run prints one indented JSON document instead, whose `json` is the structured output (null while starting or running). Once a run is `finishing` its answer is decided: the text and `json` are the answer, and `note` says claude is still running something.
 Exits: 0 printed, whatever the run's state, also when --wait-timeout passes; 1 refused — no such run, or a --schema run that ended without structured output (`message` carries its text); 2 the command line must change — no --run, --wait-timeout without --wait or not positive."""
 
 RESULT_EPILOG = f"""\
