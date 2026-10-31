@@ -11,7 +11,7 @@ from pathlib import Path
 from claude.errors import Refusal
 from claude.git import commits_beyond, delete_branch, detached_commits, leftovers, prune_worktree, unlock_and_remove
 from claude.registry import find_run, group_view, is_live, iter_runs, live_runs, read_meta, reap, registry_args, release_group, session_lock
-from claude.util import invocation, pid_alive
+from claude.util import invocation, pid_alive, process_command
 
 
 def summarize_ignored(paths):
@@ -25,10 +25,19 @@ def member_runs(runs_dir, member):
     return [reap(d) for d, m in iter_runs(runs_dir) if sid and m.get("session_id") == sid]
 
 
+def spawning(manifest):
+    """Whether the batch that wrote the manifest is still starting members: its pid alive and still this skill's batch, so a reused pid does not block clean."""
+    pid = manifest.get("spawning_pid")
+    if not pid or not pid_alive(pid):
+        return False
+    command = process_command(pid) or ""
+    return "cli.py" in command and " batch" in command
+
+
 def clean(*, runs_dir, name, force=False):
     manifest = group_view(runs_dir, name)
     members = manifest.get("members") or []
-    if manifest.get("spawning_pid") and pid_alive(manifest["spawning_pid"]):
+    if spawning(manifest):
         raise Refusal(f"group {name} is still starting its members", live=[m.get("run_id") for m in members if m.get("run_id")], instead=invocation("stop", "--group", name, *registry_args(runs_dir)), why="wait for batch to answer, or stop the group, then clean")
     live = []
     for m in members:

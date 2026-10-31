@@ -75,6 +75,7 @@ class CliRaces(Sandbox):
         """A send either lands in the run (and is delivered) or is refused; none is accepted and then lost. A burst of sends around the answer races the close; a second burst after the run has ended must all be refused."""
         import threading
 
+        accepted_total = 0
         for attempt in range(3):
             reply = self.start(f"quick {attempt} [[fake:silent:0.7]] [[fake:reply:done]]")
             results = []
@@ -94,11 +95,13 @@ class CliRaces(Sandbox):
             accepted = [json.loads(p.stdout) for p in results if p.returncode == 0]
             refused = [json.loads(p.stdout) for p in results if p.returncode == 1]
             self.assertEqual(len(accepted) + len(refused), 8)
+            accepted_total += len(accepted)
             self.assertTrue(all(a["delivered"] for a in accepted), accepted)
             self.assertEqual(row["undelivered"], [])
             self.assertEqual(row["messages"], 1 + len(accepted))
             (call,) = [c for c in self.fake_calls() if "-p" in c["argv"] and c["env"].get("CLAUDE_SKILL_RUN") == reply["run_id"]]
             self.assertEqual(sorted(m["uuid"] for m in call["messages"][1:]), sorted(a["message_uuid"] for a in accepted))
+        self.assertGreater(accepted_total, 0, "no send reached a live run: the burst raced nothing")
 
     def test_two_batches_with_one_name(self):
         import threading

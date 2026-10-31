@@ -141,10 +141,19 @@ class ReviewFindings(Sandbox):
         self.assertIn("still starting", refusal["error"])
         proc.send_signal(signal.SIGTERM)
         proc.wait(timeout=10)
+        # The killed batch's pid may be reused by another process; that must not block clean.
+        import subprocess as sp
+        other = sp.Popen(["sleep", "60"])
+        self.addCleanup(other.kill)
+        path = self.runs_dir() / ".groups" / "k.json"
+        manifest = json.loads(path.read_text())
+        manifest["spawning_pid"] = other.pid
+        path.write_text(json.dumps(manifest))
         members = self.cli_json("status", "--group", "k")["members"]
         self.assertTrue(members[0]["run_id"], members)
         stopped = self.cli_json("stop", "--group", "k")["stopped"]
         self.assertEqual([e["state"] for e in stopped], ["interrupted"])
+        self.assertNotIn("still starting", json.dumps(self.cli_json("clean", "--group", "k", "--force")))
 
     def test_clean_waits_for_a_resume_that_holds_the_session(self):
         import subprocess, sys, threading, time
@@ -171,6 +180,9 @@ class ReviewFindings(Sandbox):
         self.cli_json("stop", "--run", live["run_id"])
 
     def test_worktree_deleted_by_hand(self):
+        user_wt = self.root / "user-wt"
+        git(self.project, "worktree", "add", "-q", "-b", "userwt", str(user_wt))
+        shutil.rmtree(user_wt)
         reply = self.cli_json("batch", "--group", "s", "--worktree", "--task", "x", timeout=120)
         self.wait_state(reply["runs"][0]["run_id"])
         shutil.rmtree(self.project / ".claude" / "worktrees" / "s-1")
@@ -178,6 +190,7 @@ class ReviewFindings(Sandbox):
         self.assertTrue(out["name_released"])
         self.assertEqual(out["removed"][0].get("branch_deleted"), True, out)
         self.assertEqual(git(self.project, "branch", "--list", "--format=%(refname:short)", "worktree-s-1"), "")
+        self.assertIn(str(user_wt), git(self.project, "worktree", "list"), "clean removed the record of a worktree that is not the group's")
         self.cli_json("batch", "--group", "s", "--worktree", "--task", "again", timeout=120)
 
     def test_commits_on_a_detached_head_are_kept(self):
@@ -193,6 +206,9 @@ class ReviewFindings(Sandbox):
             self.assertEqual([k["index"] for k in out["kept"]], [1], out)
             self.assertIn("detached", out["kept"][0]["reason"])
         self.assertTrue(wt.exists())
+        git(wt, "branch", "saved")
+        self.assertTrue(self.cli_json("clean", "--group", "d")["name_released"], "following the advice should let clean finish")
+        self.assertEqual(git(self.project, "branch", "--list", "--format=%(refname:short)", "saved"), "saved")
 
     def test_orphan_still_writing_keeps_the_group_running_and_clean_refuses(self):
         import signal
@@ -201,8 +217,14 @@ class ReviewFindings(Sandbox):
         self.wait_for(lambda: self.status(run)["in_progress"], what="the Bash call")
         os.kill(json.loads((self.run_dir(run) / "meta.json").read_text())["supervisor_pid"], signal.SIGKILL)
         self.wait_state(run, states=("orphaned",))
-        self.assertEqual(self.cli_json("status", "--group", "o")["group_state"], "running")
+        st = self.cli_json("status", "--group", "o")
+        self.assertEqual((st["group_state"], st["running"], st["failed"]), ("running", [run], []))
         self.assertIn("live", self.cli_json("clean", "--group", "o", expect=1)["error"])
+        import time
+        began = time.time()
+        header = json.loads(self.cli("result", "--group", "o", "--wait", "--wait-timeout", "3").stdout.splitlines()[0])
+        self.assertGreaterEqual(time.time() - began, 2.5, "the wait returned while the member was still writing")
+        self.assertEqual(header["group_state"], "running")
         self.cli_json("stop", "--group", "o")
 
     def test_stop_on_a_group_with_no_started_member(self):

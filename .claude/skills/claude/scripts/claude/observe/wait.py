@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from claude.registry import TERMINAL
+from claude.registry import TERMINAL, claude_alive
 from claude.util import now, timings
 
 from .rows import attention, last_event_at, load
@@ -26,7 +26,8 @@ def wait(run_dirs, timeout=None):
         fresh = {}
         for d in run_dirs:
             meta, _, summary, final = load(d)
-            if meta.get("state") not in TERMINAL:
+            # A run whose claude still writes after its supervisor died has not ended (J16).
+            if meta.get("state") not in TERMINAL or claude_alive(meta):
                 ended = False
             current = attention(meta, summary, final, last_event_at(d, meta), at, since=began)
             reasons = {a["reason"] for a in current}

@@ -16,7 +16,7 @@ def group_status(registry, name):
         "group_state": group_state(states),
         "running": [r["run_id"] for r in rows if r["stored_state"] not in TERMINAL or r.get("still_writing")],
         "done": [r["run_id"] for r in rows if r["stored_state"] == "completed"],
-        "failed": [r["run_id"] for r in rows if r["stored_state"] in TERMINAL and r["stored_state"] != "completed"],
+        "failed": [r["run_id"] for r in rows if r["stored_state"] in TERMINAL and r["stored_state"] != "completed" and not r.get("still_writing")],
         "unstarted": [{"index": m["index"], "label": m.get("label"), "error": m.get("error")} for m, r in members if r is None],
         "members": [{"index": m["index"], "label": m.get("label"), **(r or {"run_id": None, "state": None, "error": m.get("error")})} for m, r in members],
     }
