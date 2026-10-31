@@ -17,7 +17,7 @@ Workers inherit your whole Claude Code environment — CLAUDE.md files, skills, 
 - **Waiting that notices trouble.** `result --wait` returns when the run ends, or early when it stalls for 10 minutes, retries the API for 2 minutes, hits a rejected rate limit, or keeps running after its answer.
 - **Steering.** `send` writes a message into a running worker (`--interrupt` ends its current turn).
 - **Resume with the same rules.** `resume` re-sends the profile, model, effort and schema every turn, because a resumed `claude -p` restores only the model.
-- **Groups and worktrees.** `batch` starts several workers as one named group; `--worktree` gives each writer its own git worktree from your local HEAD; `clean` removes them only when that loses nothing.
+- **Groups and worktrees.** `batch` starts several workers as one named group; `--worktree` gives each fresh writer (a new `write` or `auto` member without a directory of its own) its own git worktree from your local HEAD; `clean` removes them only when that loses nothing.
 - **Structured results.** `--schema` makes the answer JSON of a given shape.
 - **Diagnosis.** `doctor` checks claude's version, login, the sandbox and your current usage limits without starting a worker.
 
@@ -39,19 +39,19 @@ git clone https://github.com/tjdwls101010/claude-in-claude.git
 ln -s "$PWD/claude-in-claude/.claude/skills/claude" ~/.claude/skills/claude
 ```
 
-Pre-approve the skill and its one command form in `~/.claude/settings.json` (`permissions.allow`), with the path where the skill lives:
+The skill's folder is then, for the plugin, `~/.claude/plugins/cache/claude-in-claude/headless-workers/<version>/.claude/skills/claude`, and for the link, `~/.claude/skills/claude`. Pre-approve the skill and its one command form in `~/.claude/settings.json` (`permissions.allow`), with that folder written out:
 
 ```json
-"Skill(claude)",
-"Bash(uv run \"/Users/you/.claude/skills/claude/scripts/cli.py\" *)"
+"Skill(headless-workers:claude)",
+"Bash(uv run \"/Users/you/.claude/plugins/cache/claude-in-claude/headless-workers/0.1.0/.claude/skills/claude/scripts/cli.py\" *)"
 ```
 
-For the plugin install the skill is `Skill(headless-workers:claude)` and the path is the plugin's install directory; `doctor` prints the exact `invocation` to approve.
+For the link install the skill is `Skill(claude)` and the path `/Users/you/.claude/skills/claude/scripts/cli.py`. The rule must name the path the way the skill runs it; `doctor` prints it as `invocation`.
 
-First run:
+First run, with `SKILL_DIR` set to the skill's folder:
 
 ```bash
-uv run ~/.claude/skills/claude/scripts/cli.py doctor
+uv run "$SKILL_DIR/scripts/cli.py" doctor
 ```
 
 It exits 0 when claude, its version, the login and the registry are fine, and prints the account's current usage limits.
@@ -61,7 +61,7 @@ It exits 0 when claude, its version, the login and the registry are fine, and pr
 Inside Claude Code, ask for a worker in plain words ("have a Claude worker run the tests read-only and tell me what fails"); the skill tells Claude how to call it. By hand:
 
 ```bash
-CLI=~/.claude/skills/claude/scripts/cli.py
+CLI="$SKILL_DIR/scripts/cli.py"
 uv run "$CLI" start "Run the test suite and report failures. Change nothing." --profile read-only --model haiku
 uv run "$CLI" send <run_id> "Also say how long the suite took."   # while it runs
 uv run "$CLI" result --run <run_id> --wait          # blocks until done or attention

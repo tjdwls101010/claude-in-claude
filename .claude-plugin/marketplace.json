@@ -1,6 +1,6 @@
 {
   "name": "claude-in-claude",
-  "description": "Home of the claude plugin: run headless Claude Code workers as managed subagents from Claude Code.",
+  "description": "Home of the headless-workers plugin: run headless Claude Code workers as managed subagents from Claude Code.",
   "owner": {
     "name": "seongjin",
     "url": "https://github.com/tjdwls101010"
