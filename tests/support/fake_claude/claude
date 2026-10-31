@@ -1,0 +1,524 @@
+#!/usr/bin/env python3
+"""A stand-in for the `claude` CLI, first on PATH in tests.
+
+It records every invocation (argv, cwd, environment, the stdin messages it read) under $FAKE_CLAUDE_STATE/calls/, and answers `-p --input-format stream-json` sessions with events whose shapes are copied from real captures in $FAKE_CLAUDE_FIXTURES. What a turn does is chosen by markers in the message text, `[[fake:<name>]]` or `[[fake:<name>:<arg>]]`:
+
+  reply:TEXT        answer with TEXT (default: "ok: <message>")
+  sleep:N           a Bash call that runs N seconds; a message arriving meanwhile with priority "now" aborts the turn, otherwise it joins the same turn
+  silent:N          N seconds with no output before answering
+  write:PATH        a Write call that creates PATH (relative to cwd) with "x"
+  edit_error:PATH   an Edit call that fails
+  bash_fail         a Bash call that exits 1 with output
+  deny:PATH         a Write call outside the directory, denied
+  schema[:JSON]     a StructuredOutput call; the result carries JSON (default {"ok": true})
+  error             the turn ends with an API error result
+  crash             exit 1 mid-turn with no result
+  startup_fail      an error result before init, then exit 1
+  auth_fail         stderr "Invalid API key" and exit 1, nothing on stdout
+  retry:N           N api_retry events before answering
+  retry_hang:N      one api_retry event, then N seconds of silence
+  ratelimit:STATUS  a rate_limit_event with that status
+  ratelimit_late:STATUS  the same, after silent:N
+  followup          a task-notification follow-up turn after the answer
+  linger:N          stay alive N seconds after stdin closes
+  followups_after_close:N   after stdin closes, a follow-up turn every 0.5 s for N seconds
+  hook_block        a UserPromptSubmit hook blocks this turn-opening message
+  block_inturn      (in a message sent during a turn) a hook blocks it; no result names it
+  hook_slow:N       a UserPromptSubmit hook runs N seconds before the turn
+  nouuid            the result has no user_message_uuids
+  late_hook:N       after the result, a hook runs N seconds (started now, response later)
+  silent0           a num_turns 0 result with no reply and no hook notice
+  local             a num_turns 0 result of a local command
+  mode:M / cwd:P    init reports permission mode M / cwd P
+  subagent          an Agent call whose subagent makes one tool call
+  ignore_sigint / ignore_sigterm
+"""
+
+import copy
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+import uuid as uuidlib
+from pathlib import Path
+
+STATE = Path(os.environ.get("FAKE_CLAUDE_STATE", "/tmp/fake-claude-state"))
+FIXTURES = Path(os.environ.get("FAKE_CLAUDE_FIXTURES", Path(__file__).resolve().parent.parent / "fixtures"))
+VERSION = os.environ.get("FAKE_CLAUDE_VERSION", "2.1.314")
+MARK = re.compile(r"\[\[fake:([a-z_0-9]+)(?::(.*?))?\]\]")
+
+
+def fixture(name, index):
+    return json.loads((FIXTURES / name).read_text().splitlines()[index])
+
+
+T = {
+    "hook_started": fixture("basic_write.jsonl", 0),
+    "hook_response": fixture("basic_write.jsonl", 2),
+    "init": fixture("basic_write.jsonl", 4),
+    "tool_use": fixture("basic_write.jsonl", 7),
+    "rate_limit": fixture("basic_write.jsonl", 8),
+    "tool_result": fixture("basic_write.jsonl", 9),
+    "text": fixture("basic_write.jsonl", 13),
+    "result": fixture("basic_write.jsonl", 14),
+    "lifecycle": fixture("send_next_merged.jsonl", 4),
+    "informational": fixture("hook_block.jsonl", 25),
+    "denied": fixture("denials.jsonl", 11),
+    "error_result": fixture("sigint.jsonl", 5),
+}
+
+calls_dir = STATE / "calls"
+calls_dir.mkdir(parents=True, exist_ok=True)
+record = {"argv": sys.argv[1:], "cwd": os.getcwd(), "env": dict(os.environ), "pid": os.getpid(), "messages": [], "started": time.time()}
+record_path = calls_dir / f"{time.time_ns()}-{os.getpid()}.json"
+out_lock = threading.Lock()
+
+
+def save():
+    tmp = record_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(record))
+    os.replace(tmp, record_path)
+
+
+save()
+
+
+def flag(name, default=None):
+    a = sys.argv
+    return a[a.index(name) + 1] if name in a and a.index(name) + 1 < len(a) else default
+
+
+def emit(e):
+    with out_lock:
+        sys.stdout.write(json.dumps(e) + "\n")
+        sys.stdout.flush()
+
+
+def ev(kind, **fields):
+    e = copy.deepcopy(T[kind])
+    e["uuid"] = str(uuidlib.uuid4())
+    e["session_id"] = SESSION
+    e.update(fields)
+    return e
+
+
+def finish(code):
+    record["exit"] = code
+    save()
+    sys.stdout.flush()
+    os._exit(code)
+
+
+if sys.argv[1:2] == ["--version"]:
+    print(f"{VERSION} (Claude Code)")
+    sys.exit(0)
+if sys.argv[1:3] == ["auth", "status"]:
+    print(os.environ.get("FAKE_CLAUDE_AUTH") or json.dumps({"loggedIn": True, "authMethod": "claude.ai", "subscriptionType": "max", "email": "t@example.com"}))
+    sys.exit(0)
+if "-p" not in sys.argv:
+    print("fake claude: only -p, --version and auth status", file=sys.stderr)
+    sys.exit(2)
+
+sessions = STATE / "sessions"
+sessions.mkdir(exist_ok=True)
+SESSION = flag("--resume") or flag("--session-id") or str(uuidlib.uuid4())
+if flag("--resume") and not (sessions / f"{SESSION}.json").exists():
+    print(f"No conversation found with session ID: {SESSION}", file=sys.stderr)
+    finish(1)
+if flag("--session-id") and (sessions / f"{SESSION}.json").exists():
+    print(f"Error: Session ID {SESSION} is already in use.", file=sys.stderr)
+    finish(1)
+
+session_file = sessions / f"{SESSION}.json"
+session_data = json.loads(session_file.read_text()) if session_file.exists() else {"turns": 0, "cwd": os.getcwd(), "worktree": None}
+
+cwd = os.getcwd()
+wt_name = flag("--worktree")
+if wt_name:
+    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip()
+    wt = Path(top) / ".claude" / "worktrees" / wt_name
+    if not wt.exists():
+        r = subprocess.run(["git", "worktree", "add", "-q", "-b", f"worktree-{wt_name}", str(wt), "HEAD"], capture_output=True, text=True)
+        if r.returncode:
+            print(f"fake: worktree add failed: {r.stderr}", file=sys.stderr)
+            finish(1)
+        subprocess.run(["git", "worktree", "lock", str(wt)], capture_output=True)
+        include = Path(top) / ".worktreeinclude"
+        if include.exists():
+            for pattern in include.read_text().split():
+                src = Path(top) / pattern
+                if src.is_file():
+                    (wt / pattern).parent.mkdir(parents=True, exist_ok=True)
+                    (wt / pattern).write_bytes(src.read_bytes())
+    cwd = str(wt)
+    os.chdir(cwd)
+    session_data["worktree"] = cwd
+elif flag("--resume") and session_data.get("worktree"):
+    if not Path(session_data["worktree"]).exists():
+        print(f"Notice: the worktree {session_data['worktree']} for this session no longer exists", file=sys.stderr)
+    else:
+        cwd = session_data["worktree"]
+        os.chdir(cwd)
+
+mode = flag("--permission-mode", "default")
+model = flag("--model", "claude-sonnet-5-5")
+model = {"sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5", "opus": "claude-opus-5-5"}.get(model, model)
+cost = [0.0]
+turns_done = [0]
+flags = {"ignore_sigint": False, "ignore_sigterm": False}
+current = {"turn": None}
+
+inbox = []
+inbox_cv = threading.Condition()
+eof = threading.Event()
+
+
+def reader():
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        try:
+            m = json.loads(line)
+        except ValueError:
+            continue
+        record["messages"].append(m)
+        save()
+        with inbox_cv:
+            inbox.append(m)
+            inbox_cv.notify_all()
+    record["eof_at"] = time.time()
+    save()
+    eof.set()
+    with inbox_cv:
+        inbox_cv.notify_all()
+
+
+def marks(text):
+    return [(m.group(1), m.group(2)) for m in MARK.finditer(text or "")]
+
+
+def mark(ms, name, default=None):
+    for n, a in ms:
+        if n == name:
+            return a if a is not None else True
+    return default
+
+
+def text_of(m):
+    c = m.get("message", {}).get("content")
+    if isinstance(c, list):
+        return " ".join(b.get("text", "") for b in c if isinstance(b, dict))
+    return c or ""
+
+
+class Aborted(Exception):
+    pass
+
+
+class Interrupted(Exception):
+    pass
+
+
+def on_sigint(signum, frame):
+    if flags["ignore_sigint"]:
+        return
+    turn = current["turn"]
+    if turn is None:
+        finish(0)
+    turn["interrupted"] = True
+
+
+def on_sigterm(signum, frame):
+    if flags["ignore_sigterm"]:
+        return
+    finish(143)
+
+
+signal.signal(signal.SIGINT, on_sigint)
+signal.signal(signal.SIGTERM, on_sigterm)
+
+
+def wait_interruptible(seconds, turn, joinable=True):
+    """Sleep, watching for SIGINT and for messages that arrive meanwhile."""
+    end = time.time() + seconds
+    while time.time() < end:
+        if turn.get("interrupted"):
+            raise Interrupted()
+        with inbox_cv:
+            if inbox:
+                m = inbox[0]
+                if m.get("priority") == "now":
+                    raise Aborted()
+            inbox_cv.wait(timeout=min(0.05, max(0, end - time.time())))
+    if turn.get("interrupted"):
+        raise Interrupted()
+
+
+def tool_call(name, inp, result_content, is_error=False, use_result=None, meta=None):
+    tid = "toolu_" + uuidlib.uuid4().hex[:24]
+    use = ev("tool_use")
+    use["message"]["content"] = [{"type": "tool_use", "id": tid, "name": name, "input": inp, "caller": {"type": "direct"}}]
+    use["message"]["model"] = model
+    emit(use)
+    return tid
+
+
+def tool_done(tid, result_content, is_error=False, use_result=None, meta=None):
+    res = ev("tool_result")
+    block = {"tool_use_id": tid, "type": "tool_result", "content": result_content}
+    if is_error:
+        block["is_error"] = True
+    res["message"]["content"] = [block]
+    res["tool_use_result"] = use_result if use_result is not None else result_content
+    res["tool_result_meta"] = meta or [{"id": tid, "permission_decision": {"decision": "accept", "source": "config", "reason_type": "mode"}}]
+    res["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    emit(res)
+
+
+def say(text):
+    a = ev("text")
+    a["message"]["content"] = [{"type": "text", "text": text}]
+    a["message"]["model"] = model
+    emit(a)
+
+
+def result(uuids, text, ms, turns=2, **over):
+    cost[0] += 0.001
+    r = ev("result")
+    r.update({"result": text, "num_turns": turns, "total_cost_usd": round(cost[0], 6), "terminal_reason": "completed", "is_error": False, "subtype": "success", "permission_denials": []})
+    if not mark(ms, "nouuid"):
+        r["user_message_uuids"] = [u for u in uuids if u]
+        if r["user_message_uuids"]:
+            r["user_message_uuid"] = r["user_message_uuids"][-1]
+    r.update(over)
+    emit(r)
+    record.setdefault("results_at", []).append(time.time())
+    save()
+
+
+def init(ms):
+    emit(ev("init", cwd=mark(ms, "cwd") or cwd, model=model, permissionMode=mark(ms, "mode") or mode, claude_code_version=VERSION))
+
+
+def lifecycle(u, state):
+    if u:
+        emit(ev("lifecycle", command_uuid=u, state=state))
+
+
+def hooks(event, seconds=0.0):
+    hid = str(uuidlib.uuid4())
+    emit(ev("hook_started", hook_id=hid, hook_name=event, hook_event=event))
+    time.sleep(seconds)
+    emit(ev("hook_response", hook_id=hid, hook_name=event, hook_event=event))
+
+
+def followup_turn():
+    emit(ev("init", cwd=cwd, model=model, permissionMode=mode, claude_code_version=VERSION))
+    say("follow-up after a background task")
+    cost[0] += 0.001
+    r = ev("result")
+    r.update({"result": "follow-up after a background task", "num_turns": 1, "total_cost_usd": round(cost[0], 6), "origin": {"kind": "task-notification", "producer": "session-task"}, "permission_denials": []})
+    r.pop("user_message_uuids", None)
+    emit(r)
+
+
+def run_turn(first):
+    """One turn for message `first`, which may absorb messages that arrive while a tool runs."""
+    turn = {"interrupted": False}
+    current["turn"] = turn
+    uuids = [first.get("uuid")]
+    text = text_of(first)
+    ms = marks(text)
+    flags["ignore_sigint"] = flags["ignore_sigint"] or bool(mark(ms, "ignore_sigint"))
+    flags["ignore_sigterm"] = flags["ignore_sigterm"] or bool(mark(ms, "ignore_sigterm"))
+    if mark(ms, "auth_fail"):
+        print("Invalid API key · Please run /login", file=sys.stderr)
+        finish(1)
+    if mark(ms, "startup_fail"):
+        r = ev("error_result")
+        r.update({"errors": ["Error: cannot resume into worktree: refused"], "startup_failure_reason": "worktree_resume_refused", "num_turns": 0})
+        emit(r)
+        finish(1)
+    lifecycle(first.get("uuid"), "queued")
+    lifecycle(first.get("uuid"), "started")
+    if mark(ms, "hook_slow"):
+        hooks("UserPromptSubmit", float(mark(ms, "hook_slow")))
+    init(ms)
+    if mark(ms, "hook_block"):
+        info = ev("informational")
+        info["content"] = "UserPromptSubmit operation blocked by hook:\nblocked by fake hook"
+        info["prompt_submit_outcome"] = {"kind": "blocked_by_hook", "prompt_kept": False, "reason": "blocked by fake hook"}
+        emit(info)
+        result(uuids, info["content"], ms, turns=0, terminal_reason=None)
+        lifecycle(first.get("uuid"), "completed")
+        return
+    if mark(ms, "silent0"):
+        result(uuids, "", ms, turns=0, terminal_reason=None)
+        return
+    if mark(ms, "local"):
+        result(uuids, "compacted", ms, turns=0, terminal_reason=None, local_command="compact")
+        return
+    if mark(ms, "ratelimit"):
+        rl = ev("rate_limit")
+        rl["rate_limit_info"]["status"] = mark(ms, "ratelimit")
+        emit(rl)
+    else:
+        emit(ev("rate_limit"))
+    try:
+        if mark(ms, "silent"):
+            wait_interruptible(float(mark(ms, "silent")), turn)
+        if mark(ms, "ratelimit_late"):
+            rl = ev("rate_limit")
+            rl["rate_limit_info"]["status"] = mark(ms, "ratelimit_late")
+            emit(rl)
+        if mark(ms, "retry"):
+            for i in range(int(mark(ms, "retry"))):
+                emit({"type": "system", "subtype": "api_retry", "attempt": i + 1, "max_retries": 10, "retry_delay_ms": 100, "error_status": 529, "error": "overloaded", "uuid": str(uuidlib.uuid4()), "session_id": SESSION})
+                time.sleep(0.05)
+        if mark(ms, "retry_hang"):
+            emit({"type": "system", "subtype": "api_retry", "attempt": 1, "max_retries": 10, "retry_delay_ms": 60000, "error_status": 529, "error": "overloaded", "uuid": str(uuidlib.uuid4()), "session_id": SESSION})
+            wait_interruptible(float(mark(ms, "retry_hang")), turn)
+        if mark(ms, "crash"):
+            print("fake: crashed", file=sys.stderr)
+            finish(1)
+        if mark(ms, "write"):
+            path = mark(ms, "write")
+            full = str(Path(cwd) / path)
+            tid = tool_call("Write", {"file_path": full, "content": "x"}, None)
+            Path(full).parent.mkdir(parents=True, exist_ok=True)
+            Path(full).write_text("x")
+            tool_done(tid, f"File created successfully at: {full}", use_result={"type": "create", "filePath": full, "content": "x"})
+        if mark(ms, "edit_error"):
+            full = str(Path(cwd) / mark(ms, "edit_error"))
+            tid = tool_call("Edit", {"file_path": full, "old_string": "a", "new_string": "b"}, None)
+            tool_done(tid, "<tool_use_error>File does not exist.</tool_use_error>", is_error=True)
+        if mark(ms, "deny"):
+            full = mark(ms, "deny")
+            tid = tool_call("Write", {"file_path": full, "content": "c\n"}, None)
+            d = ev("denied", tool_name="Write", tool_use_id=tid)
+            emit(d)
+            tool_done(tid, "Permission for this tool use was denied.", is_error=True, meta=[{"id": tid, "non_execution_kind": "permission-rule", "permission_decision": {"decision": "reject", "source": "config"}}])
+            turn.setdefault("denials", []).append({"tool_name": "Write", "tool_use_id": tid, "tool_input": {"file_path": full, "content": "c\n"}})
+        if mark(ms, "bash_fail"):
+            tid = tool_call("Bash", {"command": "make test", "description": "run tests"}, None)
+            tool_done(tid, "Exit code 1\nFAIL: test_x\nassert 1 == 2", is_error=True)
+        if mark(ms, "subagent"):
+            tid = tool_call("Agent", {"description": "look around", "subagent_type": "Explore", "prompt": "look"}, None)
+            sub = ev("tool_use", parent_tool_use_id=tid)
+            sub["message"]["content"] = [{"type": "tool_use", "id": "toolu_sub", "name": "Grep", "input": {"pattern": "x"}}]
+            emit(sub)
+            tool_done(tid, [{"type": "text", "text": "found it"}])
+        if mark(ms, "sleep"):
+            seconds = float(mark(ms, "sleep"))
+            tid = tool_call("Bash", {"command": f"sleep {seconds:g}", "description": "wait"}, None)
+            try:
+                wait_interruptible(seconds, turn)
+            except Aborted:
+                tool_done(tid, "The user doesn't want to proceed with this tool use.", is_error=True)
+                result(uuids, "", ms, turns=2, terminal_reason="aborted_tools")
+                lifecycle(first.get("uuid"), "completed")
+                return
+            tool_done(tid, "", use_result={"stdout": "", "stderr": "", "interrupted": False})
+            # Messages that arrived during the tool join this turn, unless a hook blocks them.
+            with inbox_cv:
+                joined = list(inbox)
+                inbox.clear()
+            for m in joined:
+                mms = marks(text_of(m))
+                lifecycle(m.get("uuid"), "queued")
+                if mark(mms, "block_inturn"):
+                    hooks("UserPromptSubmit")
+                    lifecycle(m.get("uuid"), "started")
+                    lifecycle(m.get("uuid"), "completed")
+                    info = ev("informational")
+                    info["content"] = "UserPromptSubmit operation blocked by hook:\nblocked by fake hook"
+                    info["prompt_submit_outcome"] = {"kind": "blocked_by_hook", "prompt_kept": False, "reason": "blocked by fake hook"}
+                    emit(info)
+                    continue
+                lifecycle(m.get("uuid"), "started")
+                uuids.append(m.get("uuid"))
+                ms = ms + mms
+                text = text + " + " + text_of(m)
+        if mark(ms, "schema"):
+            raw = mark(ms, "schema")
+            obj = json.loads(raw) if isinstance(raw, str) else {"ok": True}
+            tid = tool_call("StructuredOutput", obj, None)
+            tool_done(tid, "Structured output provided successfully")
+            turn["structured"] = obj
+    except Interrupted:
+        res = ev("tool_result")
+        res["message"]["content"] = [{"tool_use_id": "toolu_x", "type": "tool_result", "content": "The user doesn't want to proceed with this tool use.", "is_error": True}]
+        emit(res)
+        r = ev("error_result")
+        r.update({"num_turns": 2, "terminal_reason": "aborted_tools", "total_cost_usd": round(cost[0], 6)})
+        if not mark(ms, "nouuid"):
+            r["user_message_uuids"] = [u for u in uuids if u]
+        emit(r)
+        finish(0)
+    except Aborted:
+        result(uuids, "", ms, turns=2, terminal_reason="aborted_tools")
+        lifecycle(first.get("uuid"), "completed")
+        return
+    reply = mark(ms, "reply")
+    reply = reply if isinstance(reply, str) else "ok: " + MARK.sub("", text).strip()[:60]
+    say(reply)
+    hooks("Stop")
+    over = {}
+    if turn.get("structured") is not None:
+        over["structured_output"] = turn["structured"]
+        reply = json.dumps(turn["structured"])
+    if turn.get("denials"):
+        over["permission_denials"] = turn["denials"]
+    if mark(ms, "error"):
+        over.update({"is_error": True, "terminal_reason": "api_error", "api_error_status": 500, "result": "API Error: 500 Internal server error"})
+    result(uuids, reply, ms, **over)
+    for u in uuids:
+        lifecycle(u, "completed")
+    turns_done[0] += 1
+    session_data["turns"] = session_data.get("turns", 0) + 1
+    session_file.write_text(json.dumps(session_data))
+    if mark(ms, "late_hook"):
+        hid = str(uuidlib.uuid4())
+        emit(ev("hook_started", hook_id=hid, hook_name="Stop", hook_event="Stop"))
+        record["late_hook_started"] = time.time()
+        time.sleep(float(mark(ms, "late_hook")))
+        record["late_hook_done"] = time.time()
+        save()
+        emit(ev("hook_response", hook_id=hid, hook_name="Stop", hook_event="Stop"))
+    if mark(ms, "followup"):
+        followup_turn()
+    current["turn"] = None
+    current["last_marks"] = ms
+
+
+def main():
+    # SessionStart hooks run before the first message, as in exp15.
+    hooks("SessionStart:startup")
+    session_file.write_text(json.dumps(session_data))
+    threading.Thread(target=reader, daemon=True).start()
+    while True:
+        with inbox_cv:
+            while not inbox and not eof.is_set():
+                inbox_cv.wait(timeout=0.1)
+            if not inbox and eof.is_set():
+                break
+            m = inbox.pop(0)
+        run_turn(m)
+    ms = current.get("last_marks") or []
+    if mark(ms, "linger"):
+        end = time.time() + float(mark(ms, "linger"))
+        while time.time() < end:
+            time.sleep(0.05)
+    if mark(ms, "followups_after_close"):
+        end = time.time() + float(mark(ms, "followups_after_close"))
+        while time.time() < end:
+            followup_turn()
+            time.sleep(0.5)
+    finish(0)
+
+
+main()
