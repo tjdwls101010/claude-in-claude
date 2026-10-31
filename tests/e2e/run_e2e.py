@@ -80,7 +80,7 @@ def build_plugin(root, variant):
     if plugin.exists():
         return plugin
     (plugin / ".claude-plugin").mkdir(parents=True)
-    (plugin / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "claude", "version": "0.0.0-e2e", "description": "e2e copy", "skills": "./skills/"}))
+    (plugin / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "headless-workers", "version": "0.0.0-e2e", "description": "e2e copy", "skills": "./skills/"}))
     dest = plugin / "skills" / "claude"
     shutil.copytree(SKILL, dest, ignore=shutil.ignore_patterns("__pycache__"))
     text = (SKILL / "SKILL.md").read_text()
@@ -148,7 +148,7 @@ def run_session(out, number, variant, timeout):
     before = snapshot(project)
     env = {k: v for k, v in os.environ.items() if k not in PARENT_IDENTITY}
     argv = ["claude", "-p", "--model", "sonnet", "--setting-sources", "project,local", "--plugin-dir", str(plugin), "--output-format", "stream-json", "--verbose",
-            "--permission-mode", "default", "--permission-prompts", "none", "--allowedTools", "Skill(claude:claude)", f'Bash(uv run "{cli}" *)', "--", prompt]
+            "--permission-mode", "default", "--permission-prompts", "none", "--allowedTools", "Skill(headless-workers:claude)", f'Bash(uv run "{cli}" *)', "--", prompt]
     started = time.time()
     try:
         proc = subprocess.run(argv, cwd=project, capture_output=True, text=True, env=env, timeout=timeout)
