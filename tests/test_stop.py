@@ -62,7 +62,8 @@ class Orphans(Sandbox):
 
     def test_dead_supervisor_is_reaped_and_claude_still_writing_is_live(self):
         reply = self.start("x [[fake:sleep:30]]")
-        self.wait_state(reply["run_id"], states=("running",))
+        # Kill the supervisor while the Bash call runs: the worker writes nothing then, so its stdout pipe closing does not end it.
+        self.wait_for(lambda: self.status(reply["run_id"])["in_progress"], what="the Bash call to start")
         self.kill_supervisor(reply["run_id"])
         row = self.wait_state(reply["run_id"], states=("orphaned",))
         self.assertTrue(row["still_writing"])
