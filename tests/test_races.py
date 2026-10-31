@@ -82,10 +82,11 @@ class CliRaces(Sandbox):
             results = []
 
             def go(i):
-                time.sleep(0.15 * i)
+                time.sleep(0.25 * i)
                 results.append(self.cli("send", reply["run_id"], f"late {i}"))
 
-            threads = [threading.Thread(target=go, args=(i,)) for i in range(12)]
+            # Spread over 4 s, so even on a loaded machine some sends land after the close.
+            threads = [threading.Thread(target=go, args=(i,)) for i in range(16)]
             for t in threads:
                 t.start()
             for t in threads:
@@ -93,7 +94,7 @@ class CliRaces(Sandbox):
             row = self.wait_state(reply["run_id"])
             accepted = [json.loads(p.stdout) for p in results if p.returncode == 0]
             refused = [json.loads(p.stdout) for p in results if p.returncode == 1]
-            self.assertEqual(len(accepted) + len(refused), 12)
+            self.assertEqual(len(accepted) + len(refused), 16)
             accepted_total += len(accepted)
             refused_total += len(refused)
             self.assertTrue(all(a["delivered"] for a in accepted), accepted)
