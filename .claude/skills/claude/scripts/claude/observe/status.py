@@ -10,11 +10,11 @@ from .rows import LISTING_ROWS, group_rows, group_state, listing_row, member_dir
 def group_status(registry, name):
     manifest, members = group_rows(registry, name)
     rows = [r for _, r in members if r]
-    states = [r["stored_state"] for r in rows] + ["failed"] * sum(1 for _, r in members if r is None)
+    states = [("running" if r.get("still_writing") else r["stored_state"]) for r in rows] + ["failed"] * sum(1 for _, r in members if r is None)
     return {
         "group": name,
         "group_state": group_state(states),
-        "running": [r["run_id"] for r in rows if r["stored_state"] not in TERMINAL],
+        "running": [r["run_id"] for r in rows if r["stored_state"] not in TERMINAL or r.get("still_writing")],
         "done": [r["run_id"] for r in rows if r["stored_state"] == "completed"],
         "failed": [r["run_id"] for r in rows if r["stored_state"] in TERMINAL and r["stored_state"] != "completed"],
         "unstarted": [{"index": m["index"], "label": m.get("label"), "error": m.get("error")} for m, r in members if r is None],
@@ -27,7 +27,8 @@ def groups_summary(registry):
     for manifest in list_groups(registry):
         states = []
         for m, d in member_dirs(registry, manifest):
-            states.append(reap(d).get("state") if d else "failed")
+            meta = reap(d) if d else None
+            states.append(("running" if is_live(meta) else meta.get("state")) if meta else "failed")
         out.append({"group": manifest["name"], "group_state": group_state(states), "members": len(manifest.get("members") or []), "worktree": bool(manifest.get("worktree")), "created": manifest.get("created")})
     return out
 

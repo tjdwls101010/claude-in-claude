@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from claude.errors import Refusal
 from claude.registry import claim_group, record_members, registry_args, resolve_runs_dir, valid_group_name
 from claude.runs import refuse_inside_worker
@@ -20,7 +22,9 @@ def batch(*, name, task_args, tasks_file, defaults, cwd, use_worktrees=False, ru
     tasks = parse_tasks(task_args, tasks_file)
     registry = resolve_runs_dir(cwd, runs_dir)
     plans, facts = plan_members(name, tasks, defaults, cwd, use_worktrees)
-    claim_group(registry, name, {"size": len(plans), "worktree": use_worktrees, "base": facts["head"], "repo": facts["repo"]})
+    # Every slot is in the manifest before anything starts and each gets its run as soon as that run exists, so an interrupted batch leaves its live members where stop --group and clean find them.
+    slots = [{"index": p["index"], "label": p["label"], "kind": p["kind"], "run_id": None, "session_id": None, "worktree": p["worktree"], "error": None} for p in plans]
+    claim_group(registry, name, {"size": len(plans), "worktree": use_worktrees, "base": facts["head"], "repo": facts["repo"], "members": slots, "spawning_pid": os.getpid()})
     results = start_members(registry, name, plans, defaults, cwd, facts)
     record_members(registry, name, [entry for entry, _ in results])
     rows = [row for _, row in results]

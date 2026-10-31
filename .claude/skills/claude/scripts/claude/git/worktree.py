@@ -140,6 +140,22 @@ def delete_branch(repo, branch):
     return code == 0, (err.strip() or None)
 
 
+def prune_worktree(repo, path):
+    """Forget a worktree whose directory is gone: unlock it and prune git's record."""
+    run_git(repo, "worktree", "unlock", str(path))
+    code, _, err = run_git(repo, "worktree", "prune")
+    return code == 0, (err.strip() or None)
+
+
+def detached_commits(repo, path, branch):
+    """Commits the worktree at `path` holds on a detached HEAD that `branch` does not contain, as a count, or 0."""
+    entry = next((e for e in worktree_entries(repo) if os.path.realpath(e["path"]) == os.path.realpath(path)), None)
+    if not entry or entry["branch"] or not entry["head"]:
+        return 0
+    code, out, _ = run_git(repo, "rev-list", "--count", entry["head"], f"^{branch}")
+    return int(out.strip()) if code == 0 and out.strip().isdigit() else 0
+
+
 def branch_exists(repo, branch):
     code, _, _ = run_git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}")
     return code == 0

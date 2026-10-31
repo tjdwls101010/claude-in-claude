@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from claude.errors import Refusal
-from claude.registry import TERMINAL, find_run, group_view, registry_args, resolve_runs_dir
+from claude.registry import TERMINAL, find_run, group_view, is_live, registry_args, resolve_runs_dir
 from claude.util import invocation, now, trim_bytes
 
 from .rows import attention, group_state, last_event_at, load, member_dirs
@@ -103,7 +103,7 @@ def group_result(registry, name, *, wait_reason=None, fresh=None, wait_timeout=N
         for path in summary["files_edited"]:
             edited.setdefault(path, []).append(m["index"])
         cost += summary["cost_usd"] or 0
-        states.append(meta.get("state"))
+        states.append("running" if is_live(meta) else meta.get("state"))
         rows.append({"index": m["index"], "label": m.get("label"), "run_id": meta["run_id"], "state": meta.get("state"), "error": meta.get("error"), "bytes": len(text.encode("utf-8")), "shown_bytes": len(shown.encode("utf-8")), "files_edited": len(summary["files_edited"]), "permission_denials": len(summary["denials"]), "worktree": (meta.get("worktree") or {}).get("path")})
         sections.append(f"--- [{tag}] run={meta['run_id']} state={meta.get('state')} bytes={len(text.encode('utf-8'))}\n" + (shown + "\n" if shown else ""))
     header = {

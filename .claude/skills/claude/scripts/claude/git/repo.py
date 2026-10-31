@@ -48,8 +48,9 @@ def head_commit(path):
 
 
 def uncommitted_count(path):
-    """Entries `git status` shows as changed or untracked (ignored files not counted), or None outside a work tree."""
-    code, out, _ = run_git(path, "status", "--porcelain", "--untracked-files=all")
+    """Entries `git status` shows as changed or untracked, leaving out ignored files and .claude/worktrees; None outside a work tree."""
+    # .claude/worktrees holds Claude Code's worktrees, never the caller's own changes.
+    code, out, _ = run_git(path, "status", "--porcelain", "--untracked-files=all", "--", ".", ":(exclude).claude/worktrees")
     if code != 0:
         return None
     return sum(1 for l in out.splitlines() if l.strip())

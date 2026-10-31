@@ -72,7 +72,7 @@ def concurrent_writers(runs_dir, cwd, run_id):
     return out
 
 
-def create_run(*, runs_dir, kind, prompt, settings, cwd, session_id=None, label=None, timeout=None, previous=None, group=None, worktree=None, expect_cwd=None, launch_cwd=None, group_info=None, worktree_info=None, extra_meta=None):
+def create_run(*, runs_dir, kind, prompt, settings, cwd, session_id=None, label=None, timeout=None, previous=None, group=None, worktree=None, expect_cwd=None, launch_cwd=None, group_info=None, worktree_info=None, extra_meta=None, precheck=None, on_published=None):
     """Publish and start one run. `kind` is `start` (a new session) or `resume` (`session_id` given). Returns the run's meta after the init wait."""
     refuse_inside_worker()
     problem = version_floor_check()
@@ -109,7 +109,16 @@ def create_run(*, runs_dir, kind, prompt, settings, cwd, session_id=None, label=
         meta.update(extra_meta or {})
         return meta
 
-    run_id, run_dir, meta = publish_run(runs_dir, session_id, label, refuse_live(runs_dir), make_meta)
+    live_check = refuse_live(runs_dir)
+
+    def check(existing):
+        live_check(existing)
+        if precheck:
+            precheck()
+
+    run_id, run_dir, meta = publish_run(runs_dir, session_id, label, check, make_meta)
+    if on_published:
+        on_published(meta)
     enqueue(run_dir, str(uuidlib.uuid4()), text, kind="prompt", head=prompt)
     pid = spawn_supervisor(run_dir)
     update_meta(run_dir, lambda m: (m.setdefault("supervisor_pid", pid), m.setdefault("supervisor_pgid", pid)))

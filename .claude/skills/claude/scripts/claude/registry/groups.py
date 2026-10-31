@@ -44,6 +44,20 @@ def record_members(runs_dir, name, members):
         if manifest is None:
             raise Refusal(f"group {name!r} was released while its members started")
         manifest["members"] = members
+        manifest.pop("spawning_pid", None)
+        write_json(_path(runs_dir, name), manifest)
+        return manifest
+
+
+def record_member(runs_dir, name, index, fields):
+    """Update one member's entry as soon as its run exists, so an interrupted batch still leaves its live members in the group."""
+    with _lock(runs_dir, name):
+        manifest = read_json(_path(runs_dir, name))
+        if manifest is None:
+            return None
+        for m in manifest.get("members") or []:
+            if m.get("index") == index:
+                m.update(fields)
         write_json(_path(runs_dir, name), manifest)
         return manifest
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from claude.claude_cli import worktree_location
 from claude.errors import Refusal
 from claude.git import branch_exists, head_commit, main_checkout, toplevel, uncommitted_count
+from claude.registry import record_member
 from claude.runs import create_run, resume, settings_for, start_reply
 
 WRITERS = ("write", "auto")
@@ -43,6 +44,9 @@ def start_member(runs_dir, group, size, plan, defaults, caller_cwd, facts):
     entry = {"index": plan["index"], "label": plan["label"], "kind": plan["kind"], "run_id": None, "session_id": None, "worktree": plan["worktree"], "error": None}
     group_info = {"name": group, "index": plan["index"], "size": size}
     task = plan["task"]
+
+    def published(meta):
+        record_member(runs_dir, group, plan["index"], {"run_id": meta["run_id"], "session_id": meta["session_id"]})
     try:
         if plan["kind"] == "start":
             wt = plan["worktree"]
@@ -50,11 +54,11 @@ def start_member(runs_dir, group, size, plan, defaults, caller_cwd, facts):
             meta = create_run(
                 runs_dir=runs_dir, kind="start", prompt=task["prompt"], settings=plan["settings"], cwd=wt["repo"] if wt else plan["cwd"], launch_cwd=wt["repo"] if wt else None,
                 label=plan["label"] or group, timeout=defaults.get("timeout"), group=group, worktree=wt["name"] if wt else None,
-                group_info=group_info, worktree_info=wt_info, extra_meta={"worktree": wt, "group_index": plan["index"]} if wt else {"group_index": plan["index"]},
+                group_info=group_info, worktree_info=wt_info, extra_meta={"worktree": wt, "group_index": plan["index"]} if wt else {"group_index": plan["index"]}, on_published=published,
             )
             reply = start_reply(meta, runs_dir)
         else:
-            reply = resume(ref=task["resume"], prompt=task["prompt"], cwd=caller_cwd, flags={**plan["flags"], "cwd": None}, label=plan["label"], timeout=defaults.get("timeout"), runs_dir=runs_dir, group=group, group_info=group_info, group_index=plan["index"])
+            reply = resume(ref=task["resume"], prompt=task["prompt"], cwd=caller_cwd, flags={**plan["flags"], "cwd": str(Path(task["cwd"]).expanduser().resolve()) if task.get("cwd") else None}, label=plan["label"], timeout=defaults.get("timeout"), runs_dir=runs_dir, group=group, group_info=group_info, group_index=plan["index"], on_published=published)
     except Refusal as e:
         entry["error"] = e.message
         return entry, {"index": plan["index"], "label": plan["label"], "run_id": None, "error": e.message, **{k: v for k, v in e.fields.items() if k in ("instead", "run_id")}}
