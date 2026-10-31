@@ -29,6 +29,13 @@ def resolve_runs_dir(cwd, runs_dir=None):
     return str(Path(base) / DIRNAME)
 
 
+def registry_args(runs_dir):
+    """`--runs-dir <dir>` when `runs_dir` is not the registry a command run from the current directory would find, so a printed command reaches the same runs wherever it is run; nothing otherwise."""
+    if os.path.realpath(runs_dir) == os.path.realpath(resolve_runs_dir(os.getcwd())):
+        return []
+    return ["--runs-dir", str(runs_dir)]
+
+
 def ensure_runs_dir(runs_dir):
     """Create the registry if needed, with a .gitignore of `*` so git never sees it."""
     path = Path(runs_dir)

@@ -103,7 +103,21 @@ def entry_path():
 
 def invocation(*args):
     """The command line that runs this skill with `args`, written the way its pre-approval pattern matches: `uv run "<cli.py>" …`."""
-    return " ".join(['uv run', f'"{entry_path()}"', *args])
+    import shlex
+
+    # The entry path is always double-quoted, as the pre-approval pattern writes it; the rest is quoted only where a shell needs it.
+    return " ".join(["uv run", f'"{entry_path()}"', *(a if a.startswith("<") else shlex.quote(a) for a in args)])
+
+
+def process_command(pid):
+    """The command line of process `pid` as `ps` reports it, or None."""
+    import subprocess
+
+    try:
+        out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return out or None
 
 
 def skill_dir():

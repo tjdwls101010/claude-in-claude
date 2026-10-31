@@ -44,8 +44,8 @@ def attention(meta, summary, final, event_at, at, since=None):
 
 def display_state(meta, summary, event_at, at):
     state = meta.get("state")
-    if state in ("starting", "running"):
-        if summary["last_event_is_retry"]:
+    if state in ACTIVE:
+        if summary["last_event_is_retry"] and state != "finishing":
             return "retrying"
         if at - event_at >= timings()["stall"]:
             return "stalled"

@@ -6,7 +6,7 @@ import time
 
 from claude.errors import Refusal
 from claude.registry import TERMINAL, claude_alive, find_run, read_meta, reap, record_if_active, resolve_runs_dir, update_meta
-from claude.util import now, timings
+from claude.util import now, process_command, timings
 
 from .create import create_run, default_cwd, refuse_inside_worker, start_reply
 from .settings import settings_for
@@ -33,6 +33,11 @@ def stop_one(run_dir):
     if meta.get("state") not in TERMINAL:
         update_meta(run_dir, lambda m: m.update({"stop_requested": now()}) if m.get("state") not in TERMINAL else None)
     pgid, pid = meta.get("claude_pgid"), meta.get("claude_pid")
+    command = process_command(pid) if pid else None
+    if pgid and pid and still and not ("claude" in (command or "") and "stream-json" in (command or "")):
+        # meta.json lies inside a writer's working directory; never signal a process group that is not the claude this run started.
+        entry.update({"state": meta.get("state"), "note": f"the recorded process {pid} is not claude ({(command or '?')[:80]}); not signalled"})
+        return entry
     if pgid and pid:
         entry["signals_sent"] = signal_ladder(pgid, pid)
     # The supervisor records the outcome once claude exits; when it is gone, record it here.

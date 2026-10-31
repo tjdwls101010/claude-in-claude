@@ -296,6 +296,8 @@ def result(uuids, text, ms, turns=2, **over):
             r["user_message_uuid"] = r["user_message_uuids"][-1]
     r.update(over)
     emit(r)
+    record.setdefault("results_at", []).append(time.time())
+    save()
 
 
 def init(ms):

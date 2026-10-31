@@ -7,7 +7,11 @@ import os
 import time
 from pathlib import Path
 
-from support.harness import ENTRY, Sandbox, TERMINAL
+import shlex
+import subprocess
+import sys
+
+from support.harness import ENTRY, FAST_TIMINGS, Sandbox, TERMINAL
 
 PARENT_IDENTITY = {
     "CLAUDE_CODE_SESSION_ID": "parent-session-id",
@@ -253,6 +257,13 @@ class StdinClose(Sandbox):
         self.assertTrue(header["answer_unconfirmed"])
         self.assertIsNone(header["answered"])
 
+    def test_without_uuids_stdin_waits_out_the_grace(self):
+        slow = json.dumps({**FAST_TIMINGS, "idle_grace": 2})
+        reply = self.start("x [[fake:nouuid]]", env={"CLAUDE_SKILL_TEST_TIMINGS": slow})
+        self.wait_state(reply["run_id"], timeout=20)
+        call = worker_calls(self.fake_calls())[0]
+        self.assertGreaterEqual(call["eof_at"] - call["results_at"][-1], 1.8, "stdin closed before stdout had been quiet for the grace")
+
     def test_an_open_hook_keeps_stdin_open(self):
         reply = self.start("x [[fake:nouuid]] [[fake:late_hook:2]]")
         self.wait_state(reply["run_id"], timeout=20)
@@ -280,10 +291,48 @@ class Finishing(Sandbox):
         self.assertIn("--wait", header["next"]["command"])
         self.assertEqual(self.wait_state(reply["run_id"], timeout=20)["state"], "completed")
 
-    def test_follow_up_turns_after_close_still_end_the_wait(self):
-        reply = self.start("x [[fake:reply:answer]] [[fake:followups_after_close:6]]")
+    def test_follow_up_turns_after_close_still_end_the_wait_with_the_answer(self):
+        reply = self.start("x [[fake:reply:the real answer]] [[fake:followups_after_close:6]]")
         proc = self.cli("result", "--run", reply["run_id"], "--wait", "--wait-timeout", "15")
-        header = json.loads(proc.stdout.splitlines()[0])
+        header, _, text = proc.stdout.partition("\n")
+        header = json.loads(header)
         self.assertEqual(header["state"], "finishing")
         self.assertEqual([a["reason"] for a in header["attention"]], ["finishing"])
+        self.assertEqual(text, "the real answer\n", "a finishing run's answer is decided; follow-ups are not it")
+        self.assertIn("answer", header["note"])
         self.cli_json("stop", "--run", reply["run_id"])
+
+    def test_finishing_schema_run_has_its_json(self):
+        schema = self.root / "s.json"
+        schema.write_text("{}")
+        reply = self.start('x [[fake:schema:{"v": 1}]] [[fake:linger:6]]', "--schema", str(schema))
+        self.wait_state(reply["run_id"], states=("finishing",))
+        doc = json.loads(self.cli("result", "--run", reply["run_id"]).stdout)
+        self.assertEqual(doc["json"], {"v": 1})
+
+    def test_silent_finishing_run_shows_stalled(self):
+        reply = self.start("x [[fake:linger:8]]", env={"CLAUDE_SKILL_TEST_TIMINGS": json.dumps({**FAST_TIMINGS, "finishing_attention": 100})})
+        self.wait_state(reply["run_id"], states=("finishing",))
+        self.wait_for(lambda: self.status(reply["run_id"])["state"] == "stalled", timeout=10, what="stalled")
+        self.cli_json("stop", "--run", reply["run_id"])
+
+
+class NextCommand(Sandbox):
+    def run_next(self, command, cwd):
+        argv = shlex.split(command)
+        self.assertEqual(argv[:2], ["uv", "run"])
+        return subprocess.run([sys.executable, *argv[2:]], cwd=cwd, capture_output=True, text=True, env=self.env, timeout=60)
+
+    def test_next_reaches_the_registry_it_was_given(self):
+        elsewhere = self.root / "elsewhere dir"
+        elsewhere.mkdir()
+        for flags in (["--project", str(self.project)], ["--runs-dir", str(self.root / "my reg")]):
+            with self.subTest(flags):
+                reply = self.cli_json("start", "hi", *flags, cwd=elsewhere)
+                proc = self.run_next(reply["next"]["command"], elsewhere)
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertEqual(json.loads(proc.stdout.splitlines()[0])["run_id"], reply["run_id"])
+
+    def test_plain_next_has_no_registry_flag(self):
+        reply = self.start("hi")
+        self.assertNotIn("--runs-dir", reply["next"]["command"])

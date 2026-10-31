@@ -73,3 +73,21 @@ class Orphans(Sandbox):
         self.assertEqual(entry["signals_sent"], ["SIGINT"])
         self.assertEqual(entry["state"], "orphaned")
         self.assertNotIn("still_writing", self.status(reply["run_id"]))
+
+
+class ForgedMeta(Sandbox):
+    def test_stop_signals_only_a_claude_process(self):
+        import subprocess
+
+        reply = self.start("x")
+        self.wait_state(reply["run_id"])
+        victim = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        self.addCleanup(victim.kill)
+        path = self.run_dir(reply["run_id"]) / "meta.json"
+        meta = json.loads(path.read_text())
+        meta.update({"claude_pid": victim.pid, "claude_pgid": victim.pid, "state": "orphaned"})
+        path.write_text(json.dumps(meta))
+        (entry,) = self.cli_json("stop", "--run", reply["run_id"])["stopped"]
+        self.assertEqual(entry["signals_sent"], [])
+        self.assertIn("not claude", entry["note"])
+        self.assertIsNone(victim.poll(), "the forged process group was signalled")

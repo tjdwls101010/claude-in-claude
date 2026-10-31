@@ -13,6 +13,7 @@ __all__ = [
     "read_meta",
     "reap",
     "record_if_active",
+    "registry_args",
     "resolve_runs_dir",
     "supervisor_alive",
     "claude_alive",
@@ -21,4 +22,4 @@ __all__ = [
 ]
 
 from .inbox import close, enqueue, pending, take
-from .runs import ACTIVE, TERMINAL, claude_alive, ensure_runs_dir, find_run, is_live, iter_runs, live_runs, publish_run, read_meta, reap, record_if_active, resolve_runs_dir, supervisor_alive, update_meta
+from .runs import ACTIVE, TERMINAL, claude_alive, ensure_runs_dir, find_run, is_live, iter_runs, live_runs, publish_run, read_meta, reap, record_if_active, registry_args, resolve_runs_dir, supervisor_alive, update_meta

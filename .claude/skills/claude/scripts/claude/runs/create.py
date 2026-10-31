@@ -12,7 +12,7 @@ from pathlib import Path
 from claude.claude_cli import build_argv, profile_exceptions, turn_preamble, version_floor_check
 from claude.errors import Refusal
 from claude.git import main_checkout, toplevel
-from claude.registry import TERMINAL, claude_alive, enqueue, is_live, live_runs, publish_run, read_meta, supervisor_alive, update_meta
+from claude.registry import TERMINAL, claude_alive, enqueue, is_live, live_runs, publish_run, read_meta, registry_args, supervisor_alive, update_meta
 from claude.util import entry_path, invocation, now, timings
 
 RUN_VARIABLE = "CLAUDE_SKILL_RUN"
@@ -24,17 +24,21 @@ def refuse_inside_worker():
         raise Refusal(f"this command runs inside worker run {os.environ[RUN_VARIABLE]}; a worker cannot start, steer, stop or clean workers", inside_run=os.environ[RUN_VARIABLE])
 
 
-def live_instead(run_id, meta):
+def live_instead(run_id, meta, runs_dir):
     """What to do instead of starting another run on a session that has a live one (J16): send to it while its stdin is open, otherwise stop it first."""
+    extra = registry_args(runs_dir)
     if meta.get("state") in ("starting", "running") and meta.get("stdin_open") and supervisor_alive(meta):
-        return {"instead": invocation("send", run_id, "<message>"), "why": "the run is live and still reading messages"}
-    return {"instead": f"{invocation('stop', '--run', run_id)}, then resume", "why": "the run is finishing or its supervisor is gone while claude still runs"}
+        return {"instead": invocation("send", run_id, "<message>", *extra), "why": "the run is live and still reading messages"}
+    return {"instead": f"{invocation('stop', '--run', run_id, *extra)}, then resume", "why": "the run is finishing or its supervisor is gone while claude still runs"}
 
 
-def refuse_live(existing):
-    for meta in existing:
-        if is_live(meta):
-            raise Refusal(f"session {meta.get('session_id')} has a live run {meta.get('run_id')} ({meta.get('state')}{', still writing' if meta.get('state') in TERMINAL else ''}); two processes on one session mix their transcripts", run_id=meta.get("run_id"), state=meta.get("state"), **live_instead(meta.get("run_id"), meta))
+def refuse_live(runs_dir):
+    def check(existing):
+        for meta in existing:
+            if is_live(meta):
+                raise Refusal(f"session {meta.get('session_id')} has a live run {meta.get('run_id')} ({meta.get('state')}{', still writing' if meta.get('state') in TERMINAL else ''}); two processes on one session mix their transcripts", run_id=meta.get("run_id"), state=meta.get("state"), **live_instead(meta.get("run_id"), meta, runs_dir))
+
+    return check
 
 
 def default_cwd(cwd):
@@ -105,7 +109,7 @@ def create_run(*, runs_dir, kind, prompt, settings, cwd, session_id=None, label=
         meta.update(extra_meta or {})
         return meta
 
-    run_id, run_dir, meta = publish_run(runs_dir, session_id, label, refuse_live, make_meta)
+    run_id, run_dir, meta = publish_run(runs_dir, session_id, label, refuse_live(runs_dir), make_meta)
     enqueue(run_dir, str(uuidlib.uuid4()), text, kind="prompt", head=prompt)
     pid = spawn_supervisor(run_dir)
     update_meta(run_dir, lambda m: (m.setdefault("supervisor_pid", pid), m.setdefault("supervisor_pgid", pid)))
@@ -119,7 +123,7 @@ def start_reply(meta, runs_dir):
         "run_id": meta["run_id"],
         "session_id": meta["session_id"],
         "state": meta.get("state"),
-        "next": {"command": invocation("result", "--run", meta["run_id"], "--wait"), "run_in_background": True, "why": "returns when the run ends or needs attention, and prints its result"},
+        "next": {"command": invocation("result", "--run", meta["run_id"], "--wait", *registry_args(runs_dir)), "run_in_background": True, "why": "returns when the run ends or needs attention, and prints its result"},
         "profile": meta["settings"]["profile"],
         "permission_mode": init.get("permission_mode"),
         "mode_mismatch": meta.get("mode_mismatch"),

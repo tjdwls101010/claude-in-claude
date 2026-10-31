@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from claude.errors import Refusal
-from claude.registry import TERMINAL, find_run, resolve_runs_dir
+from claude.registry import TERMINAL, find_run, registry_args, resolve_runs_dir
 from claude.util import invocation, now
 
 from .rows import attention, last_event_at, load
 from .wait import wait
+
+def registry_of(run_dir):
+    return str(Path(run_dir).parent)
+
 
 BASH_NOTE = "files_edited lists Edit, Write and NotebookEdit calls; files a shell command wrote are not in it"
 
@@ -17,8 +22,10 @@ BASH_NOTE = "files_edited lists Edit, Write and NotebookEdit calls; files a shel
 def run_result(run_dir, *, wait_reason=None, wait_attention=None, wait_timeout=None):
     meta, events, summary, final = load(run_dir)
     live = meta.get("state") not in TERMINAL
+    # Once stdin has closed (finishing) the answer is decided (J3); whatever claude still prints is not it.
+    decided = not live or meta.get("state") == "finishing"
     chosen = final["result"]
-    text = chosen["text"] if chosen and not live else (summary["last_message"] or (chosen["text"] if chosen else "")) or ""
+    text = chosen["text"] if chosen and decided else (summary["last_message"] or (chosen["text"] if chosen else "")) or ""
     header = {
         "run_id": meta["run_id"],
         "session_id": meta.get("session_id"),
@@ -45,8 +52,8 @@ def run_result(run_dir, *, wait_reason=None, wait_attention=None, wait_timeout=N
         "message_bytes": len(text.encode("utf-8")),
     }
     if live:
-        header["note"] = "the run is live: this is its latest message, not its answer"
-        args = ["result", "--run", meta["run_id"], "--wait"]
+        header["note"] = "the answer is in and stdin is closed, but claude is still running something" if decided else "the run is live: this is its latest message, not its answer"
+        args = ["result", "--run", meta["run_id"], "--wait", *registry_args(registry_of(run_dir))]
         if wait_timeout:
             args += ["--wait-timeout", f"{wait_timeout:g}"]
         header["next"] = {"command": invocation(*args), "run_in_background": True, "why": "waits again, for the end or for attention that is new"}
@@ -54,7 +61,7 @@ def run_result(run_dir, *, wait_reason=None, wait_attention=None, wait_timeout=N
         header["note"] = "--wait-timeout passed before the run ended; " + header.get("note", "")
     schema = (meta.get("settings") or {}).get("schema_text")
     if schema is not None:
-        obj = chosen["structured_output"] if chosen and not live else None
+        obj = chosen["structured_output"] if chosen and decided else None
         if not live and obj is None:
             raise Refusal("the run ended without structured output", run_id=meta["run_id"], state=meta.get("state"), message=text, error_detail=meta.get("error"))
         doc = {k: header[k] for k in ("run_id", "session_id", "state", "exit_code", "error", "attention", "permission_denials", "files_edited", "cost_usd") if k in header}
