@@ -85,6 +85,42 @@ class Real(unittest.TestCase):
         self.assertEqual(changed, [], f"the worker's tools changed the tree; startup artifacts were {startup}")
         print(f"\nread-only: startup artifacts {startup}; cost ${header['cost_usd']}")
 
+    def test_resume_resends_the_profile(self):
+        project = make_repo(self.root / "resume", BUGGY)
+        first, header, _ = self.run_to_end("Reply with the single word ONE.", "--profile", "read-only", cwd=project)
+        self.assertEqual(header["state"], "completed", header)
+        again = self.cli_json("resume", first["run_id"], "Reply with the single word TWO.", cwd=project)
+        self.assertEqual(again["permission_mode"], "dontAsk", "a resumed -p session falls back to the user's default mode unless the profile is sent again")
+        proc = self.cli("result", "--run", again["run_id"], "--wait", "--wait-timeout", "300", cwd=project)
+        self.assertIn("TWO", proc.stdout)
+        changed = self.cli_json("resume", again["run_id"], "Reply with the single word THREE.", "--profile", "write", cwd=project)
+        self.assertEqual((changed["permission_mode"], changed["profile_changed_from"]), ("acceptEdits", "read-only"))
+        self.cli("result", "--run", changed["run_id"], "--wait", "--wait-timeout", "300", cwd=project)
+
+    def test_send_redirects_a_running_worker(self):
+        project = make_repo(self.root / "send", BUGGY)
+        reply = self.cli_json("start", "Run `sleep 20` with the Bash tool in the foreground, then reply with the word RED.", "--model", MODEL, "--effort", "low", "--profile", "read-only", cwd=project)
+        time.sleep(6)
+        sent = self.cli_json("send", reply["run_id"], "Change of plan: when the command finishes, reply with the word BLUE instead of RED.", cwd=project)
+        self.assertTrue(sent["delivered"], sent)
+        proc = self.cli("result", "--run", reply["run_id"], "--wait", "--wait-timeout", "300", cwd=project)
+        header, _, text = proc.stdout.partition("\n")
+        header = json.loads(header)
+        self.assertEqual(header["state"], "completed", header)
+        self.assertIn("BLUE", text)
+        self.assertIn(sent["message_uuid"], [a["uuid"] for a in header["answered"]])
+
+    def test_stop_then_resume_knows_it_was_interrupted(self):
+        project = make_repo(self.root / "stop", BUGGY)
+        reply = self.cli_json("start", "Run `sleep 60` with the Bash tool in the foreground, then reply DONE.", "--model", MODEL, "--effort", "low", "--profile", "read-only", cwd=project)
+        time.sleep(8)
+        (entry,) = self.cli_json("stop", "--run", reply["run_id"], cwd=project)["stopped"]
+        self.assertEqual(entry["state"], "interrupted")
+        self.assertEqual(entry["signals_sent"][0], "SIGINT")
+        again = self.cli_json("resume", reply["run_id"], "Was your previous command interrupted before it finished? Answer YES or NO and nothing else.", cwd=project)
+        proc = self.cli("result", "--run", again["run_id"], "--wait", "--wait-timeout", "300", cwd=project)
+        self.assertIn("YES", proc.stdout.upper().split("\n", 1)[1])
+
 
 if __name__ == "__main__":
     unittest.main()

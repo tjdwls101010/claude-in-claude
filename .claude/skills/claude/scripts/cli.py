@@ -22,7 +22,7 @@ from pathlib import Path
 from claude.claude_cli import PROFILES, VERSION_FLOOR_TEXT
 from claude.errors import Refusal
 from claude.observe import LISTING_ROWS, STALL_SECONDS, log, result, status
-from claude.runs import DEFAULTS, EFFORTS, start, stop, supervise
+from claude.runs import DEFAULTS, EFFORTS, SEND_LIMIT, resume, send, start, stop, supervise
 
 EXIT_REFUSED, EXIT_ARGUMENTS, EXIT_BLOCKED = 1, 2, 3
 
@@ -47,6 +47,16 @@ START_DESC = f"""\
 Start a fresh worker session on PROMPT, detached.
 Prints: one JSON line — `run_id`, `session_id`, `state`, `next` (the `result --run <id> --wait` call to run in the background), `profile`, `permission_mode` (what claude reported), `mode_mismatch`, `model`, `effort`, `cwd`, `concurrent_writers` (other live runs that can write in the same directory), `profile_exceptions`, `events` (the raw stream-json file); `error` and `stderr_tail` instead of `next` when the run failed while starting.
 Exits: 0 started; 1 refused or failed — run from inside a worker, claude missing or older than {VERSION_FLOOR_TEXT}, or the run failed before its first init (`error` says why); 2 the command line must change — no prompt or an empty one, an unreadable --prompt-file or --schema, a --cwd that is not a directory, or anything else the parser refuses."""
+
+RESUME_DESC = f"""\
+Run another turn on an existing session, detached: a new run with its own events, under the profile, model, effort and schema the session's last run recorded, except where a flag changes them — every turn re-sends them, because a resumed `claude -p` restores only the model. Continue a session when the new work builds on what it worked out; start fresh when it does not.
+Prints: one JSON line as `start` prints, plus `profile_changed_from` when --profile changed it, and `note` for a session the registry never saw.
+Exits: 0 started; 1 refused or failed — the session has a live run (`instead` says what to do: `send` while it reads messages, otherwise `stop` first), run from inside a worker, claude missing or older than {VERSION_FLOOR_TEXT}, an unknown REF that is not a session id, or the run failed before its first init (a session claude does not know fails here); 2 the command line must change — no REF, no prompt or an empty one, a session the registry never saw without --profile, or anything else the parser refuses."""
+
+SEND_DESC = f"""\
+Write a message into a live run while it works, to correct or extend what it is doing. By default the message has priority `next`: Claude Code reads it once the tools it is running finish, in the same turn or, if the turn ends first, as the next one. --interrupt sends it with priority `now`, which ends the running turn and starts on the message. The run ends once every message has been answered.
+Prints: one JSON line — `run_id`, `message_uuid`, `priority`, `delivered` (whether the supervisor wrote it to the worker within 10 s), and `note` when it did not.
+Exits: 0 queued; 1 refused — the run no longer reads messages (it ended, is finishing, or its supervisor is gone; `instead` says what to do), it already took {SEND_LIMIT} messages, no such run, or run from inside a worker; 2 the command line must change — no REF, no message or an empty one."""
 
 STATUS_DESC = f"""\
 What the registry knows: every live run plus the {LISTING_ROWS} newest, or one run in full.
@@ -107,7 +117,7 @@ class OneLinePerParagraph(argparse.HelpFormatter):
         return super()._format_action(action)
 
 
-VISIBLE = ("start", "status", "log", "result", "stop")
+VISIBLE = ("start", "resume", "send", "status", "log", "result", "stop")
 
 
 class ArgumentError(Exception):
@@ -153,6 +163,26 @@ def build_parser():
     p.add_argument("--cwd", metavar="DIR", help="the worker's working directory (default: the top level of the current git checkout, or the current directory)")
     add_registry(p)
 
+    p = sub.add_parser("resume", usage="cli.py resume REF [PROMPT | --prompt-file FILE] [--profile P] [--model M] [--effort E] [--schema FILE] [options]", help="run another turn on a session, detached", description=RESUME_DESC, epilog=RUN_EPILOG, formatter_class=OneLinePerParagraph)
+    p.add_argument("ref", metavar="REF", help="a run id, a session id, or a unique prefix of either; or the id of a session this registry never saw (then --profile is required)")
+    p.add_argument("prompt", nargs="?", metavar="PROMPT", help="what the worker should do next; or give --prompt-file, or pipe it on stdin")
+    p.add_argument("--prompt-file", metavar="FILE", help="read the prompt from FILE")
+    p.add_argument("--profile", choices=PROFILES, help="change the profile from this turn on (see start --help); required for a session the registry never saw")
+    p.add_argument("--model", help="change the model from this turn on")
+    p.add_argument("--effort", choices=EFFORTS, help="change the effort from this turn on")
+    p.add_argument("--schema", metavar="FILE", help="a JSON Schema file for this and later turns' answers")
+    p.add_argument("--timeout", type=positive, metavar="SEC", help="stop this run after SEC seconds and record it timed_out")
+    p.add_argument("--label", help="a short name for this run (default: the session's last label)")
+    p.add_argument("--cwd", metavar="DIR", help="the directory to resume in (default: where the session last ran); Claude Code finds a session by its project directory")
+    add_registry(p)
+
+    p = sub.add_parser("send", usage="cli.py send REF [MESSAGE | --message-file FILE] [--interrupt]", help="write a message into a live run", description=SEND_DESC, formatter_class=OneLinePerParagraph)
+    p.add_argument("ref", metavar="REF", help="a run id, a session id, or a unique prefix of either")
+    p.add_argument("message", nargs="?", metavar="MESSAGE", help="the message; or give --message-file, or pipe it on stdin")
+    p.add_argument("--message-file", metavar="FILE", help="read the message from FILE")
+    p.add_argument("--interrupt", action="store_true", help="priority `now`: end the running turn and start on this message")
+    add_registry(p)
+
     p = sub.add_parser("status", usage="cli.py status [--run REF]", help="list runs, or show one run in full", description=STATUS_DESC, epilog=STATUS_EPILOG, formatter_class=OneLinePerParagraph)
     p.add_argument("--run", metavar="REF", help="a run id, a session id, or a unique prefix of either")
     add_registry(p)
@@ -176,23 +206,29 @@ def build_parser():
     return root
 
 
-def read_prompt(args, command):
-    if args.prompt is not None and args.prompt_file:
-        raise Refusal("give the prompt once: PROMPT or --prompt-file", arguments=True, help=f"{command} --help")
-    if args.prompt_file:
+def read_text(value, path, command, what="prompt"):
+    """The text given as a positional, a file, or on stdin — exactly one of them, and not empty."""
+    flag = f"--{what}-file"
+    if value is not None and path:
+        raise Refusal(f"give the {what} once: {what.upper()} or {flag}", arguments=True, help=f"{command} --help")
+    if path:
         try:
-            text = Path(args.prompt_file).expanduser().read_text(encoding="utf-8")
+            text = Path(path).expanduser().read_text(encoding="utf-8")
         except OSError as e:
-            raise Refusal(f"--prompt-file {args.prompt_file}: {e.strerror or e}", arguments=True, help=f"{command} --help")
-    elif args.prompt is not None:
-        text = args.prompt
+            raise Refusal(f"{flag} {path}: {e.strerror or e}", arguments=True, help=f"{command} --help")
+    elif value is not None:
+        text = value
     elif not sys.stdin.isatty():
         text = sys.stdin.read()
     else:
         text = ""
     if not text.strip():
-        raise Refusal("the prompt is empty", arguments=True, help=f"{command} --help")
+        raise Refusal(f"the {what} is empty", arguments=True, help=f"{command} --help")
     return text
+
+
+def read_prompt(args, command):
+    return read_text(args.prompt, args.prompt_file, command)
 
 
 def base_dir(args):
@@ -204,7 +240,7 @@ def run_flags(args):
     if args.cwd:
         cwd = Path(args.cwd).expanduser()
         if not cwd.is_dir():
-            raise Refusal(f"--cwd {args.cwd} is not a directory", arguments=True, help="start --help")
+            raise Refusal(f"--cwd {args.cwd} is not a directory", arguments=True, help=f"{args.command} --help")
         flags["cwd"] = str(cwd.resolve())
     return flags
 
@@ -219,6 +255,13 @@ def dispatch(args):
         reply = start(prompt=read_prompt(args, "start"), cwd=base_dir(args), flags=run_flags(args), label=args.label, timeout=args.timeout, runs_dir=args.runs_dir)
         emit(reply)
         return EXIT_REFUSED if reply.get("state") == "failed" else 0
+    if c == "resume":
+        reply = resume(ref=args.ref, prompt=read_prompt(args, "resume"), cwd=base_dir(args), flags=run_flags(args), label=args.label, timeout=args.timeout, runs_dir=args.runs_dir)
+        emit(reply)
+        return EXIT_REFUSED if reply.get("state") == "failed" else 0
+    if c == "send":
+        emit(send(ref=args.ref, message=read_text(args.message, args.message_file, "send", "message"), interrupt=args.interrupt, cwd=base_dir(args), runs_dir=args.runs_dir))
+        return 0
     if c == "status":
         emit(status(cwd=base_dir(args), ref=args.run, runs_dir=args.runs_dir))
         return 0
