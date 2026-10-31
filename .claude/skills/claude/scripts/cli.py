@@ -21,6 +21,7 @@ from pathlib import Path
 
 from claude.batch import TASK_FIELDS, batch, clean
 from claude.claude_cli import PROFILES, VERSION_FLOOR_TEXT
+from claude.doctor import doctor
 from claude.errors import Refusal
 from claude.observe import GROUP_MESSAGE_CAP, LISTING_ROWS, STALL_SECONDS, log, result, status
 from claude.runs import DEFAULTS, EFFORTS, SEND_LIMIT, resume, send, start, stop, supervise
@@ -115,6 +116,12 @@ Prints: one JSON line — `stopped`, an entry per run with `run_id`, `session_id
 Exits: 0 every run was tried; 1 refused — run from inside a worker, or no such run or group; 2 the command line must change — neither or both of --run and --group."""
 
 
+DOCTOR_DESC = f"""\
+The environment a run would start in, checked without starting a worker: Python; claude on PATH and its version against {VERSION_FLOOR_TEXT}; login (`authMethod`, `subscriptionType`); what the read-only and write sandbox needs on this platform; the account's usage limits now, from `claude -p /usage` in safe mode (no model call); the registry, its live runs, groups and worktrees under .claude/worktrees; and settings in your files that widen the read-only and write profiles.
+Prints: one JSON line — `ok`, `blockers`, `warnings`, then `python`, `claude` (`path`, `version`, `floor`, `verified`), `auth`, `sandbox` (`platform`, `supported`, `missing`), `quota` (`limits`, each with `kind`, `percent`, `resets_at`, `scope`, `severity`; or `error`), `skill_dir`, `entry`, `invocation` (the command form the pre-approval matches), `registry` (`path`, `exists`, `writable`, `live_runs`, `groups`, `worktrees`), and `profile_exceptions` per profile.
+Exits: 0 no blocker; 3 a blocker would stop every run — no claude, a claude older than {VERSION_FLOOR_TEXT}, not logged in, Python below 3.11, a registry that cannot be written; 2 an argument the parser refuses."""
+
+
 class OneLinePerParagraph(argparse.HelpFormatter):
     """Each help paragraph and list item as one physical line, never re-wrapped; suppressed subcommands left out of the listing."""
 
@@ -135,7 +142,7 @@ class OneLinePerParagraph(argparse.HelpFormatter):
         return super()._format_action(action)
 
 
-VISIBLE = ("start", "resume", "send", "batch", "status", "log", "result", "stop", "clean")
+VISIBLE = ("start", "resume", "send", "batch", "status", "log", "result", "stop", "clean", "doctor")
 
 
 class ArgumentError(Exception):
@@ -243,6 +250,9 @@ def build_parser():
     p.add_argument("--force", action="store_true", help="also remove worktrees holding uncommitted, untracked or ignored work, discarding it; live work and branches with commits are still kept")
     add_registry(p)
 
+    p = sub.add_parser("doctor", usage="cli.py doctor [--project DIR]", help="check the environment a run would start in", description=DOCTOR_DESC, formatter_class=OneLinePerParagraph)
+    add_registry(p)
+
     p = sub.add_parser("__supervise", help=argparse.SUPPRESS)
     p.add_argument("--run-dir", required=True)
     return root
@@ -327,6 +337,10 @@ def dispatch(args):
     if c == "stop":
         emit(stop(refs=args.run or [], group=args.group, cwd=base_dir(args), runs_dir=args.runs_dir))
         return 0
+    if c == "doctor":
+        reply = doctor(cwd=base_dir(args), runs_dir=args.runs_dir)
+        emit(reply)
+        return 0 if reply["ok"] else EXIT_BLOCKED
     if c == "__supervise":
         return supervise(args.run_dir)
     raise Refusal("no command given", arguments=True, help="--help")

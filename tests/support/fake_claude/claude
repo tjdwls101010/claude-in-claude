@@ -124,6 +124,12 @@ if sys.argv[1:2] == ["--version"]:
 if sys.argv[1:3] == ["auth", "status"]:
     print(os.environ.get("FAKE_CLAUDE_AUTH") or json.dumps({"loggedIn": True, "authMethod": "claude.ai", "subscriptionType": "max", "email": "t@example.com"}))
     sys.exit(0)
+if "-p" in sys.argv and sys.argv[-1] == "/usage":
+    if os.environ.get("FAKE_CLAUDE_USAGE") == "fail":
+        print("usage unavailable", file=sys.stderr)
+        sys.exit(1)
+    sys.stdout.write((FIXTURES / "usage.jsonl").read_text())
+    sys.exit(0)
 if "-p" not in sys.argv:
     print("fake claude: only -p, --version and auth status", file=sys.stderr)
     sys.exit(2)
