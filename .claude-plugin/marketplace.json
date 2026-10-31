@@ -1,0 +1,17 @@
+{
+  "name": "claude-in-claude",
+  "description": "Home of the claude plugin: run headless Claude Code workers as managed subagents from Claude Code.",
+  "owner": {
+    "name": "seongjin",
+    "url": "https://github.com/tjdwls101010"
+  },
+  "plugins": [
+    {
+      "name": "headless-workers",
+      "source": "./",
+      "description": "Run headless Claude Code workers as managed subagents — a handle at once, a compact log, one call that waits for the result and wakes you on stalls, steering with send, stop and resume, groups with a worktree per writer, and schema-shaped results, each turn pinned to a permission profile.",
+      "category": "development",
+      "keywords": ["claude-code", "subagent", "headless", "delegation", "orchestration", "background-tasks", "sandbox"]
+    }
+  ]
+}

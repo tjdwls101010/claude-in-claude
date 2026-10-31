@@ -1,0 +1,15 @@
+{
+  "name": "headless-workers",
+  "displayName": "Claude in Claude",
+  "description": "Run headless Claude Code workers as managed subagents from Claude Code: start one in the background and get a handle at once, read a compact log of what it did, wait for its result in one call that also wakes you when it stalls, retries or hits a rate limit, steer it with a message while it runs, stop and resume it, run several as one group with a git worktree per writer, and collect text or schema-shaped JSON. Each turn is pinned to a read-only, write or auto permission profile; a read-only worker can run your tests while your tree stays untouched.",
+  "version": "0.1.0",
+  "author": {
+    "name": "seongjin",
+    "url": "https://github.com/tjdwls101010"
+  },
+  "homepage": "https://github.com/tjdwls101010/claude-in-claude",
+  "repository": "https://github.com/tjdwls101010/claude-in-claude",
+  "license": "Apache-2.0",
+  "keywords": ["background-tasks", "batch", "claude-code", "delegation", "git-worktree", "headless", "orchestration", "parallel", "sandbox", "subagent"],
+  "skills": ["./.claude/skills/"]
+}
