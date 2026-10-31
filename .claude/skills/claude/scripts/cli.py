@@ -357,6 +357,10 @@ def main(argv=None):
     except Refusal as e:
         emit(e.reply())
         return EXIT_ARGUMENTS if e.arguments else EXIT_REFUSED
+    except OSError as e:
+        # A registry or file the command cannot write is an outcome to report, not a traceback.
+        emit({"error": f"{e.strerror or e}: {e.filename}" if e.filename else str(e)})
+        return EXIT_REFUSED
 
 
 if __name__ == "__main__":

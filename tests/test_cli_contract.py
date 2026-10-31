@@ -102,3 +102,15 @@ class Entry(Sandbox):
         proc = subprocess.run(["uv", "run", str(ENTRY), "status"], cwd=self.project, capture_output=True, text=True, env={**self.env, "PATH": self.env["PATH"] + ":" + str(__import__("pathlib").Path(shutil.which("uv")).parent)}, timeout=120)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(json.loads(proc.stdout)["runs"], [])
+
+
+class UnwritableRegistry(Sandbox):
+    def test_reported_as_json(self):
+        import os
+
+        locked = self.root / "ro"
+        locked.mkdir()
+        os.chmod(locked, 0o555)
+        self.addCleanup(os.chmod, locked, 0o755)
+        reply = self.cli_json("start", "x", "--runs-dir", str(locked / "reg"), expect=1)
+        self.assertIn("reg", reply["error"])
