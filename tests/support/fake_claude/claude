@@ -31,7 +31,12 @@ It records every invocation (argv, cwd, environment, the stdin messages it read)
   local             a num_turns 0 result of a local command
   mode:M / cwd:P    init reports permission mode M / cwd P
   subagent          an Agent call whose subagent makes one tool call
+  ccwrites          create the empty .claude/.cc-writes/ Claude Code makes at the first sandboxed Bash call
+  commit:MSG        commit everything in cwd with message MSG
   ignore_sigint / ignore_sigterm
+
+A model answers no sooner than FAKE_CLAUDE_REPLY_DELAY seconds (default 0.3) after init, as a real first token takes at least that long.
+With FAKE_CLAUDE_STARTUP_LINK=1 a SessionStart hook makes the symlink .claude/histories in cwd before the first init, as the user's history hook does.
 """
 
 import copy
@@ -362,6 +367,7 @@ def run_turn(first):
     if mark(ms, "local"):
         result(uuids, "compacted", ms, turns=0, terminal_reason=None, local_command="compact")
         return
+    time.sleep(float(os.environ.get("FAKE_CLAUDE_REPLY_DELAY", "0.3")))
     if mark(ms, "ratelimit"):
         rl = ev("rate_limit")
         rl["rate_limit_info"]["status"] = mark(ms, "ratelimit")
@@ -392,6 +398,11 @@ def run_turn(first):
             Path(full).parent.mkdir(parents=True, exist_ok=True)
             Path(full).write_text("x")
             tool_done(tid, f"File created successfully at: {full}", use_result={"type": "create", "filePath": full, "content": "x"})
+        if mark(ms, "ccwrites"):
+            (Path(cwd) / ".claude" / ".cc-writes").mkdir(parents=True, exist_ok=True)
+        if mark(ms, "commit"):
+            subprocess.run(["git", "add", "-A"], cwd=cwd, capture_output=True)
+            subprocess.run(["git", "-c", "user.email=w@example.com", "-c", "user.name=w", "commit", "-q", "-m", str(mark(ms, "commit"))], cwd=cwd, capture_output=True)
         if mark(ms, "edit_error"):
             full = str(Path(cwd) / mark(ms, "edit_error"))
             tid = tool_call("Edit", {"file_path": full, "old_string": "a", "new_string": "b"}, None)
@@ -497,6 +508,11 @@ def run_turn(first):
 
 def main():
     # SessionStart hooks run before the first message, as in exp15.
+    if os.environ.get("FAKE_CLAUDE_STARTUP_LINK") == "1":
+        link = Path(cwd) / ".claude" / "histories"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if not link.is_symlink():
+            os.symlink(str(STATE / "histories-target"), link)
     hooks("SessionStart:startup")
     session_file.write_text(json.dumps(session_data))
     threading.Thread(target=reader, daemon=True).start()

@@ -5,9 +5,11 @@ from __future__ import annotations
 import re
 import time
 import uuid as uuidlib
+from pathlib import Path
 
 from claude.errors import Refusal
-from claude.registry import TERMINAL, claude_alive, enqueue, find_run, is_live, read_meta, reap, record_if_active, registry_args, resolve_runs_dir, supervisor_alive, update_meta
+from claude.git import is_worktree, uncommitted_count
+from claude.registry import TERMINAL, claude_alive, enqueue, find_run, group_view, is_live, read_meta, reap, record_if_active, registry_args, resolve_runs_dir, supervisor_alive, update_meta
 from claude.util import invocation, now, process_command, timings
 
 from .create import create_run, default_cwd, refuse_inside_worker, start_reply
@@ -29,7 +31,7 @@ SEND_LIMIT = 16
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
-def resume(*, ref, prompt, cwd, flags, label=None, timeout=None, runs_dir=None):
+def resume(*, ref, prompt, cwd, flags, label=None, timeout=None, runs_dir=None, group=None, group_info=None, group_index=None, on_published=None):
     """Run another turn on an existing session as a new run, re-sending its profile, model, effort and schema (a resumed `-p` session restores only its model). `ref` is a run, a session the registry knows, or the id of a session it never saw, which then needs --profile."""
     registry = resolve_runs_dir(cwd, runs_dir)
     try:
@@ -44,12 +46,28 @@ def resume(*, ref, prompt, cwd, flags, label=None, timeout=None, runs_dir=None):
     if newest:
         record = {**newest["settings"]}
     settings = settings_for({**flags, "resume": True}, record)
-    if newest:
+    wt = (newest or {}).get("worktree")
+    expect_cwd = worktree_info = worktree_check = None
+    if wt:
+        # A worktree member resumes from where it was launched and Claude Code re-enters its worktree; a worktree that is gone would silently resume in the launch directory instead (J17).
+        def worktree_check():
+            if not Path(wt["path"]).is_dir() or not is_worktree(wt["repo"], wt["path"]):
+                raise Refusal(f"the worktree {wt['path']} this session ran in is gone or no longer a git worktree; resuming would continue in {newest.get('launch_cwd')} without isolation", run_id=newest["run_id"], instead=invocation("start", "<prompt>", *registry_args(registry)), why="start a fresh session; the old one's work is in its branch " + wt["branch"])
+
+        # Checked now for a quick refusal, and again under the session lock, where `clean` cannot remove the worktree in between.
+        worktree_check()
+        run_cwd = expect_cwd = wt["path"]
+        launch_cwd = newest.get("launch_cwd")
+        worktree_info = {"path": wt["path"], "base": wt["base"], "uncommitted": uncommitted_count(wt["repo"])}
+    elif newest:
         run_cwd = flags.get("cwd") or newest.get("cwd")
         launch_cwd = flags.get("cwd") or newest.get("launch_cwd") or run_cwd
     else:
         run_cwd = launch_cwd = flags.get("cwd") or default_cwd(cwd)
-    meta = create_run(runs_dir=registry, kind="resume", prompt=prompt, settings=settings, cwd=run_cwd, launch_cwd=launch_cwd, session_id=session_id, label=label or (newest or {}).get("label"), timeout=timeout, previous=(newest or {}).get("run_id"), group=(newest or {}).get("group"))
+    extra = {"worktree": wt} if wt else {}
+    if group_index is not None:
+        extra["group_index"] = group_index
+    meta = create_run(runs_dir=registry, kind="resume", prompt=prompt, settings=settings, cwd=run_cwd, launch_cwd=launch_cwd, expect_cwd=expect_cwd, session_id=session_id, label=label or (newest or {}).get("label"), timeout=timeout, previous=(newest or {}).get("run_id"), group=group or (newest or {}).get("group"), group_info=group_info, worktree_info=worktree_info, extra_meta=extra, precheck=worktree_check, on_published=on_published)
     reply = start_reply(meta, registry)
     if settings["changed"].get("profile"):
         reply["profile_changed_from"] = settings["changed"]["profile"]
@@ -137,11 +155,16 @@ def stop_one(run_dir):
     return entry
 
 
-def stop(*, refs=(), cwd, runs_dir=None, run_dirs=None):
-    """Stop each run named in `refs` (or each directory in `run_dirs`): SIGINT to its process group, then SIGTERM, then SIGKILL, so Claude Code can end the turn and keep the session resumable."""
+def stop(*, refs=(), group=None, cwd, runs_dir=None):
+    """Stop each run named in `refs`, or every member of `group` (its newest run): SIGINT to its process group, then SIGTERM, then SIGKILL, so Claude Code can end the turn and keep the session resumable."""
     refuse_inside_worker()
     registry = resolve_runs_dir(cwd, runs_dir)
-    dirs = list(run_dirs or []) + [find_run(registry, r) for r in refs]
-    if not dirs:
+    dirs = [find_run(registry, r) for r in refs]
+    if group:
+        for m in group_view(registry, group).get("members") or []:
+            ref = m.get("session_id") or m.get("run_id")
+            if ref:
+                dirs.append(find_run(registry, ref))
+    if not dirs and not group:
         raise Refusal("nothing to stop", arguments=True, help="stop --help")
     return {"stopped": [stop_one(d) for d in dirs]}

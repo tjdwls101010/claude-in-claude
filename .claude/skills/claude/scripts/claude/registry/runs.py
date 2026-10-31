@@ -119,10 +119,15 @@ def new_run_id(label=None):
     return f"{time.strftime('%Y%m%d-%H%M%S')}-{slug}-{secrets.token_hex(2)}"
 
 
+def session_lock(runs_dir, session_id):
+    """The lock every new run of a session is published under; `clean` holds it while it removes a member's worktree, so a resume cannot start in between."""
+    return locked(Path(runs_dir) / ".locks" / f"session-{session_id}.lock")
+
+
 def publish_run(runs_dir, session_id, label, check, make_meta):
     """Create a run for `session_id` under the session's lock: `check(existing metas of that session)` may refuse, then a fresh run directory is claimed and `make_meta(run_id, run_dir)` written as its meta.json. Returns (run_id, run_dir, meta)."""
     ensure_runs_dir(runs_dir)
-    with locked(Path(runs_dir) / ".locks" / f"session-{session_id}.lock"):
+    with session_lock(runs_dir, session_id):
         check([reap(d) for d, m in iter_runs(runs_dir) if m.get("session_id") == session_id])
         for _ in range(20):
             run_id = new_run_id(label)
