@@ -166,3 +166,18 @@ class Worktrees(Sandbox):
         f = self.root / f"tasks-{len(list(self.root.glob('tasks-*')))}.jsonl"
         f.write_text("\n".join(json.dumps(t) for t in tasks))
         return f
+
+
+class BatchNext(Sandbox):
+    def test_next_reaches_the_registry_it_was_given(self):
+        import shlex
+        import subprocess
+        import sys
+
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        reply = self.cli_json("batch", "--group", "far", "--task", "x", "--project", str(self.project), cwd=elsewhere, timeout=120)
+        argv = shlex.split(reply["next"]["command"])
+        proc = subprocess.run([sys.executable, *argv[2:]], cwd=elsewhere, capture_output=True, text=True, env=self.env, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(json.loads(proc.stdout.splitlines()[0])["group"], "far")

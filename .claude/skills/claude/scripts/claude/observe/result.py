@@ -93,9 +93,9 @@ def group_result(registry, name, *, wait_reason=None, fresh=None, wait_timeout=N
             states.append("failed")
             continue
         meta, _, summary, final = load(d)
-        live = meta.get("state") not in TERMINAL
+        decided = meta.get("state") in TERMINAL or meta.get("state") == "finishing"
         chosen = final["result"]
-        text = (summary["last_message"] or "") if live or not chosen else chosen["text"]
+        text = chosen["text"] if chosen and decided else (summary["last_message"] or "")
         shown = trim_bytes(text, GROUP_MESSAGE_CAP)
         att = (fresh or {}).get(d) or attention(meta, summary, final, last_event_at(d, meta), now()) or None
         if att:
@@ -115,7 +115,7 @@ def group_result(registry, name, *, wait_reason=None, fresh=None, wait_timeout=N
         "members": rows,
     }
     if header["group_state"] == "running":
-        args = ["result", "--group", name, "--wait"]
+        args = ["result", "--group", name, "--wait", *registry_args(registry)]
         if wait_timeout:
             args += ["--wait-timeout", f"{wait_timeout:g}"]
         header["next"] = {"command": invocation(*args), "run_in_background": True, "why": "waits again, for every member to end or for attention that is new"}

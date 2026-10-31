@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from claude.errors import Refusal
-from claude.registry import claim_group, record_members, resolve_runs_dir, valid_group_name
+from claude.registry import claim_group, record_members, registry_args, resolve_runs_dir, valid_group_name
 from claude.runs import refuse_inside_worker
 from claude.util import invocation
 
@@ -27,7 +27,7 @@ def batch(*, name, task_args, tasks_file, defaults, cwd, use_worktrees=False, ru
     spawned = sum(1 for r in rows if r.get("run_id"))
     reply = {"group": name, "spawned": spawned, "requested": len(plans), "runs": rows}
     if spawned:
-        reply["next"] = {"command": invocation("result", "--group", name, "--wait"), "run_in_background": True, "why": "returns when every member has ended or one needs attention, and prints each member's result"}
+        reply["next"] = {"command": invocation("result", "--group", name, "--wait", *registry_args(registry)), "run_in_background": True, "why": "returns when every member has ended or one needs attention, and prints each member's result"}
     isolated = [p for p in plans if p["worktree"]]
     if isolated:
         reply["worktrees"] = {"base": facts["head"], "uncommitted_in_your_tree": facts["uncommitted"], "note": "each worktree starts from your local HEAD without your uncommitted changes, and holds only what git tracks plus .worktreeinclude copies; moving changes back into your tree is yours to do, then `clean`"}

@@ -51,7 +51,7 @@ def resume(*, ref, prompt, cwd, flags, label=None, timeout=None, runs_dir=None, 
     if wt:
         # A worktree member resumes from where it was launched and Claude Code re-enters its worktree; a worktree that is gone would silently resume in the launch directory instead (J17).
         if not Path(wt["path"]).is_dir() or not is_worktree(wt["repo"], wt["path"]):
-            raise Refusal(f"the worktree {wt['path']} this session ran in is gone or no longer a git worktree; resuming would continue in {newest.get('launch_cwd')} without isolation", run_id=newest["run_id"], instead=invocation("start", "<prompt>"), why="start a fresh session; the old one's work is in its branch " + wt["branch"])
+            raise Refusal(f"the worktree {wt['path']} this session ran in is gone or no longer a git worktree; resuming would continue in {newest.get('launch_cwd')} without isolation", run_id=newest["run_id"], instead=invocation("start", "<prompt>", *registry_args(registry)), why="start a fresh session; the old one's work is in its branch " + wt["branch"])
         run_cwd = expect_cwd = wt["path"]
         launch_cwd = newest.get("launch_cwd")
         worktree_info = {"path": wt["path"], "base": wt["base"], "uncommitted": uncommitted_count(wt["repo"])}

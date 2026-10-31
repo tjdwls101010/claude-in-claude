@@ -10,7 +10,7 @@ from pathlib import Path
 
 from claude.errors import Refusal
 from claude.git import commits_beyond, delete_branch, leftovers, unlock_and_remove
-from claude.registry import find_run, group_view, is_live, iter_runs, live_runs, read_meta, reap, release_group
+from claude.registry import find_run, group_view, is_live, iter_runs, live_runs, read_meta, reap, registry_args, release_group
 from claude.util import invocation
 
 
@@ -34,7 +34,7 @@ def clean(*, runs_dir, name, force=False):
             if is_live(meta):
                 live.append(meta["run_id"])
     if live:
-        raise Refusal(f"group {name} has live runs; live work is never removed", live=live, instead=invocation("stop", "--group", name), why="stop them first, then clean")
+        raise Refusal(f"group {name} has live runs; live work is never removed", live=live, instead=invocation("stop", "--group", name, *registry_args(runs_dir)), why="stop them first, then clean")
     removed, kept = [], []
     others = [m for _, m in live_runs(runs_dir)]
     for m in members:
@@ -45,7 +45,7 @@ def clean(*, runs_dir, name, force=False):
         entry = {"index": m["index"], "path": str(path), "branch": wt["branch"]}
         occupied = [o["run_id"] for o in others if os.path.realpath(o.get("cwd") or "").startswith(os.path.realpath(path))]
         if occupied:
-            kept.append({**entry, "reason": "a live run outside the group works in it", "occupied_by": [{"run_id": r, "stop": invocation("stop", "--run", r)} for r in occupied]})
+            kept.append({**entry, "reason": "a live run outside the group works in it", "occupied_by": [{"run_id": r, "stop": invocation("stop", "--run", r, *registry_args(runs_dir))} for r in occupied]})
             continue
         if path.exists():
             first = None
