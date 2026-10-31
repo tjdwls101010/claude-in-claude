@@ -14,7 +14,7 @@ from support.harness import engine
 
 cli = engine("claude.claude_cli")
 
-DISALLOWED = ["Skill(claude)", "Skill(claude:claude)", "Monitor", "SendMessage", "PushNotification", "CronCreate", "RemoteTrigger"]
+DISALLOWED = ["Skill(claude)", "Skill(claude:claude)", "Skill(headless-workers:claude)", "Monitor", "SendMessage", "PushNotification", "CronCreate", "RemoteTrigger"]
 COMMON_HEAD = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-hook-events", "--permission-prompts", "none"]
 
 

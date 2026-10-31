@@ -9,8 +9,8 @@ from pathlib import Path
 
 PROFILES = ("read-only", "write", "auto")
 
-# Tools no worker gets: the skill itself (a worker cannot start workers), Monitor (its notifications keep a finished run alive for as long as the watched command runs), and tools whose effect outlives the turn or bypasses the registry.
-ALWAYS_DISALLOWED = ("Skill(claude)", "Skill(claude:claude)", "Monitor", "SendMessage", "PushNotification", "CronCreate", "RemoteTrigger")
+# Tools no worker gets: the skill itself under each name it can have — a user skill, a project skill, the headless-workers plugin's — (a worker cannot start workers), Monitor (its notifications keep a finished run alive for as long as the watched command runs), and tools whose effect outlives the turn or bypasses the registry.
+ALWAYS_DISALLOWED = ("Skill(claude)", "Skill(claude:claude)", "Skill(headless-workers:claude)", "Monitor", "SendMessage", "PushNotification", "CronCreate", "RemoteTrigger")
 EDIT_TOOLS = ("Edit", "Write", "NotebookEdit")
 
 # Writable for every sandboxed profile besides the sandbox's own TMPDIR: tool caches (uv, pip, npm) live here, so a read-only run can still run a project's tests.

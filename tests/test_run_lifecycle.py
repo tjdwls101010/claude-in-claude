@@ -64,7 +64,7 @@ class Start(Sandbox):
         while i < len(argv) and not argv[i].startswith("--"):
             tools.append(argv[i])
             i += 1
-        self.assertEqual(tools, ["Skill(claude)", "Skill(claude:claude)", "Monitor", "SendMessage", "PushNotification", "CronCreate", "RemoteTrigger", "Edit", "Write", "NotebookEdit"])
+        self.assertEqual(tools, ["Skill(claude)", "Skill(claude:claude)", "Skill(headless-workers:claude)", "Monitor", "SendMessage", "PushNotification", "CronCreate", "RemoteTrigger", "Edit", "Write", "NotebookEdit"])
         self.assertIn("non-interactive", flag_value(argv, "--append-system-prompt"))
         self.assertEqual(call["cwd"], str(self.project))
         self.assertEqual([m["message"]["content"] for m in call["messages"]], ["hi"])
