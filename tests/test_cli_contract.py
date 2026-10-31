@@ -53,7 +53,7 @@ class Help(unittest.TestCase):
         out = subcommand_help("status")
         self.assertIn("\n  stalled      starting or running with no event for 600 s; advisory, nothing is killed — read `in_progress` beside it\n", out)
         start = subcommand_help("start")
-        self.assertIn("  read-only  reads anything, and runs shell commands inside a sandbox that can write only its TMPDIR and ~/.cache", start)
+        self.assertIn("  read-only  reads anything, and runs any shell command inside a sandbox that can write only its TMPDIR and ~/.cache", start)
 
     def test_closed_sets_are_choices(self):
         start = subcommand_help("start")

@@ -19,8 +19,8 @@ def _inbox(run_dir):
     return Path(run_dir) / "inbox"
 
 
-def enqueue(run_dir, uuid, text, *, priority=None, kind="send", limit=None):
-    """Put a message in the inbox while stdin is open. Returns None when queued, otherwise why not: `closed`, or `limit` when the run already took `limit` sends."""
+def enqueue(run_dir, uuid, text, *, priority=None, kind="send", limit=None, head=None):
+    """Put a message in the inbox while stdin is open. `head` is what listings show of it (default: the text's first 80 characters). Returns None when queued, otherwise why not: `closed`, or `limit` when the run already took `limit` sends."""
     with run_lock(run_dir):
         meta = read_meta(run_dir)
         if not meta.get("stdin_open"):
@@ -31,7 +31,7 @@ def enqueue(run_dir, uuid, text, *, priority=None, kind="send", limit=None):
         _inbox(run_dir).mkdir(exist_ok=True)
         name = f"{time.time_ns():020d}-{uuid}.json"
         write_json(_inbox(run_dir) / name, {"uuid": uuid, "text": text, "priority": priority, "kind": kind})
-        messages.append({"uuid": uuid, "head": text[:80], "bytes": len(text.encode("utf-8")), "priority": priority, "kind": kind, "enqueued_at": now(), "delivered_at": None, "after_line": None})
+        messages.append({"uuid": uuid, "head": (head if head is not None else text)[:80], "bytes": len(text.encode("utf-8")), "priority": priority, "kind": kind, "enqueued_at": now(), "delivered_at": None, "after_line": None})
         write_json(meta_path(run_dir), meta)
         return None
 

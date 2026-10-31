@@ -34,6 +34,16 @@ WORKER_CONTEXT = (
 )
 
 
+def turn_preamble(profile, *, group=None, worktree=None):
+    """What this turn's prompt is prefixed with: the group a batch member belongs to and a worktree member's checkout. None when there is nothing to say."""
+    lines = []
+    if group:
+        lines.append(f"[You are member {group['index']} of {group['size']} in group {group['name']}, started together on related tasks; the others work in parallel and you will not see their work.]")
+    if worktree:
+        lines.append(f"[You are working in a git worktree at {worktree['path']}, not the caller's checkout. It was created from commit {worktree['base']}; the caller's tree has {worktree['uncommitted']} uncommitted file(s) that are not here.]")
+    return "\n".join(lines) or None
+
+
 def worker_context():
     """The standing facts appended to every turn's system prompt. The same text every turn, so a resumed session reads what it was started with."""
     return WORKER_CONTEXT
@@ -62,6 +72,9 @@ def build_argv(settings, *, session_id, resume, cwd, worktree=None, schema_text=
         flag_settings["worktree"] = {"baseRef": "head"}
     argv = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-hook-events", "--permission-prompts", "none"]
     argv += ["--permission-mode", PERMISSION_MODE[profile], "--model", settings["model"], "--effort", settings["effort"]]
+    if sandbox:
+        # Sandbox auto-allow leaves some shell forms (a loop, `$?`) to the permission check, which nobody can answer here; approving Bash outright keeps the sandbox as the boundary for every form.
+        argv += ["--allowedTools", "Bash"]
     argv += ["--append-system-prompt", WORKER_CONTEXT]
     # Variadic: every token after it up to the next flag is a tool name, so a flag must follow.
     argv += ["--disallowedTools", *disallowed]
@@ -165,7 +178,7 @@ def profile_exceptions(cwd, profile, *, env=None, managed_dir=None, project_root
 
         if profile in SANDBOXED:
             if value := _get(data, "sandbox", "excludedCommands"):
-                add("sandbox.excludedCommands", value, "these commands run outside the sandbox: unrestricted writes and network")
+                add("sandbox.excludedCommands", value, "these commands run outside the sandbox, approved like every shell command: unrestricted writes and network")
             if value := _get(data, "sandbox", "filesystem", "allowWrite"):
                 add("sandbox.filesystem.allowWrite", value, "sandboxed commands can also write here")
             if value := _get(data, "sandbox", "network", "allowedDomains"):

@@ -42,6 +42,7 @@ class ProfileArgv(unittest.TestCase):
         argv = self.build("read-only")
         self.assertEqual(argv[: len(COMMON_HEAD)], COMMON_HEAD)
         self.assertEqual(flag_value(argv, "--permission-mode"), "dontAsk")
+        self.assertEqual(flag_values(argv, "--allowedTools"), ["Bash"])
         self.assertEqual(flag_values(argv, "--disallowedTools"), DISALLOWED + ["Edit", "Write", "NotebookEdit"])
         self.assertEqual(
             json.loads(flag_value(argv, "--settings")),
@@ -51,6 +52,7 @@ class ProfileArgv(unittest.TestCase):
     def test_write(self):
         argv = self.build("write")
         self.assertEqual(flag_value(argv, "--permission-mode"), "acceptEdits")
+        self.assertEqual(flag_values(argv, "--allowedTools"), ["Bash"])
         self.assertEqual(flag_values(argv, "--disallowedTools"), DISALLOWED)
         self.assertEqual(
             json.loads(flag_value(argv, "--settings")),
@@ -62,6 +64,7 @@ class ProfileArgv(unittest.TestCase):
         self.assertEqual(flag_value(argv, "--permission-mode"), "auto")
         self.assertEqual(flag_values(argv, "--disallowedTools"), DISALLOWED)
         self.assertNotIn("--settings", argv)
+        self.assertNotIn("--allowedTools", argv, "auto leaves every call to the classifier")
 
     def test_one_disallowed_flag(self):
         for profile in ("read-only", "write", "auto"):
@@ -101,11 +104,12 @@ class ProfileArgv(unittest.TestCase):
         auto = json.loads(flag_value(self.build("auto", worktree="g-2"), "--settings"))
         self.assertEqual(auto, {"worktree": {"baseRef": "head"}})
 
-    def test_every_flag_after_the_variadic_list_is_a_flag(self):
-        """Commander's variadic --disallowedTools swallows plain words, so whatever follows it starts with `--`."""
+    def test_every_flag_after_a_variadic_list_is_a_flag(self):
+        """Commander's variadic --allowedTools and --disallowedTools swallow plain words, so whatever follows each starts with `--`."""
         argv = self.build("read-only", schema_text="{}", worktree="g-1")
-        i = argv.index("--disallowedTools") + 1 + len(flag_values(argv, "--disallowedTools"))
-        if i < len(argv):
+        for flag in ("--allowedTools", "--disallowedTools"):
+            i = argv.index(flag) + 1 + len(flag_values(argv, flag))
+            self.assertLess(i, len(argv), f"{flag} is last")
             self.assertTrue(argv[i].startswith("--"), argv[i])
 
     def test_unknown_profile_is_refused(self):
@@ -221,6 +225,19 @@ class ProfileExceptions(unittest.TestCase):
         self.write(self.proj / ".claude" / "settings.json", {"sandbox": {"excludedCommands": ["make"]}})
         got = cli.profile_exceptions(str(sub), "write", env={"HOME": str(self.home)}, managed_dir=str(self.root / "managed"), project_roots=[str(self.proj)])
         self.assertEqual(self.settings_named(got), ["sandbox.excludedCommands"])
+
+
+class TurnPreamble(unittest.TestCase):
+    def test_nothing_to_say_for_a_lone_run(self):
+        for profile in ("read-only", "write", "auto"):
+            self.assertIsNone(cli.turn_preamble(profile))
+
+    def test_group_and_worktree_facts(self):
+        text = cli.turn_preamble("write", group={"name": "g", "index": 2, "size": 3}, worktree={"path": "/r/.claude/worktrees/g-2", "base": "abc123", "uncommitted": 4})
+        self.assertIn("member 2 of 3 in group g", text)
+        self.assertIn("/r/.claude/worktrees/g-2", text)
+        self.assertIn("abc123", text)
+        self.assertIn("4 uncommitted", text)
 
 
 class WorktreeLocation(unittest.TestCase):

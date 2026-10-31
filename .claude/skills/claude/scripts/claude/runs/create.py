@@ -9,7 +9,7 @@ import time
 import uuid as uuidlib
 from pathlib import Path
 
-from claude.claude_cli import build_argv, profile_exceptions, version_floor_check, worker_context
+from claude.claude_cli import build_argv, profile_exceptions, turn_preamble, version_floor_check
 from claude.errors import Refusal
 from claude.git import main_checkout, toplevel
 from claude.registry import TERMINAL, claude_alive, enqueue, is_live, live_runs, publish_run, read_meta, supervisor_alive, update_meta
@@ -68,7 +68,7 @@ def concurrent_writers(runs_dir, cwd, run_id):
     return out
 
 
-def create_run(*, runs_dir, kind, prompt, settings, cwd, session_id=None, label=None, timeout=None, previous=None, group=None, worktree=None, expect_cwd=None, launch_cwd=None, preamble=None, extra_meta=None):
+def create_run(*, runs_dir, kind, prompt, settings, cwd, session_id=None, label=None, timeout=None, previous=None, group=None, worktree=None, expect_cwd=None, launch_cwd=None, group_info=None, worktree_info=None, extra_meta=None):
     """Publish and start one run. `kind` is `start` (a new session) or `resume` (`session_id` given). Returns the run's meta after the init wait."""
     refuse_inside_worker()
     problem = version_floor_check()
@@ -76,6 +76,8 @@ def create_run(*, runs_dir, kind, prompt, settings, cwd, session_id=None, label=
         raise Refusal(problem)
     session_id = session_id or str(uuidlib.uuid4())
     launch_cwd = launch_cwd or cwd
+    # Facts that can change from turn to turn (the profile, a group, a worktree) go in front of the prompt, not into the system prompt, which a resumed session keeps as first recorded.
+    preamble = turn_preamble(settings["profile"], group=group_info, worktree=worktree_info)
     text = f"{preamble}\n\n{prompt}" if preamble else prompt
     argv = build_argv(settings, session_id=session_id, resume=kind == "resume", cwd=cwd, worktree=worktree, schema_text=settings.get("schema_text"))
     roots = [r for r in {toplevel(cwd), main_checkout(cwd)} if r]
@@ -104,7 +106,7 @@ def create_run(*, runs_dir, kind, prompt, settings, cwd, session_id=None, label=
         return meta
 
     run_id, run_dir, meta = publish_run(runs_dir, session_id, label, refuse_live, make_meta)
-    enqueue(run_dir, str(uuidlib.uuid4()), text, kind="prompt")
+    enqueue(run_dir, str(uuidlib.uuid4()), text, kind="prompt", head=prompt)
     pid = spawn_supervisor(run_dir)
     update_meta(run_dir, lambda m: (m.setdefault("supervisor_pid", pid), m.setdefault("supervisor_pgid", pid)))
     return wait_for_init(run_dir, timings()["init_wait"])

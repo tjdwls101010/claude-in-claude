@@ -34,8 +34,8 @@ Exit codes: 0 success; 1 the registry's state refused the command, or what it as
 Runs live in .claude-runs/ of the repository's main checkout (outside git, of the current directory); --project or --runs-dir point a command at another registry."""
 
 PROFILE_HELP = f"""what the worker may do (default {DEFAULTS['profile']}). The profile is a restriction laid over your own Claude Code settings, not a replacement: settings that widen it are listed in the reply's `profile_exceptions`.
-  read-only  reads anything, and runs shell commands inside a sandbox that can write only its TMPDIR and ~/.cache and reach only hosts your settings allow (none by default) — so it can run tests and builds and bring back what they printed. No edit tools. Hooks, MCP tools and WebFetch run outside the sandbox under your permission rules.
-  write      edits and shell writes inside the working directory, the same network as read-only; edits outside it are denied and listed in `permission_denials`.
+  read-only  reads anything, and runs any shell command inside a sandbox that can write only its TMPDIR and ~/.cache and reach only hosts your settings allow (none by default) — so it can run tests and builds and bring back what they printed. The sandbox, not a permission check, is the boundary. No edit tools. Hooks, MCP tools and WebFetch run outside the sandbox under your permission rules.
+  write      edits and shell writes inside the working directory, any shell command inside the same sandbox and network as read-only; edits outside it are denied and listed in `permission_denials`.
   auto       Claude Code's auto-mode classifier reviews each call: network and writes outside the directory are possible, and a call it blocks is a denial. A model without auto mode starts in another mode and the reply says `mode_mismatch`."""
 
 RUN_EPILOG = f"""\
