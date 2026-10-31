@@ -19,9 +19,10 @@ import os
 import sys
 from pathlib import Path
 
+from claude.batch import TASK_FIELDS, batch, clean
 from claude.claude_cli import PROFILES, VERSION_FLOOR_TEXT
 from claude.errors import Refusal
-from claude.observe import LISTING_ROWS, STALL_SECONDS, log, result, status
+from claude.observe import GROUP_MESSAGE_CAP, LISTING_ROWS, STALL_SECONDS, log, result, status
 from claude.runs import DEFAULTS, EFFORTS, SEND_LIMIT, resume, send, start, stop, supervise
 
 EXIT_REFUSED, EXIT_ARGUMENTS, EXIT_BLOCKED = 1, 2, 3
@@ -58,10 +59,25 @@ Write a message into a live run while it works, to correct or extend what it is 
 Prints: one JSON line — `run_id`, `message_uuid`, `priority`, `delivered` (whether the supervisor wrote it to the worker within 10 s), and `note` when it did not.
 Exits: 0 queued; 1 refused — the run no longer reads messages (it ended, is finishing, or its supervisor is gone; `instead` says what to do), it already took {SEND_LIMIT} messages, no such run, or run from inside a worker; 2 the command line must change — no REF, no message or an empty one."""
 
+BATCH_DESC = f"""\
+Start several runs as one named group: each --task, then each --tasks-file line, is a member started as `start` (or `resume`) would start it, with the group's flags as its defaults. The group is one name for `status`, `result` and `stop` with --group, and for `clean`; it outlives the session that started it, and its name stays reserved until `clean` releases it. N workers spend the same subscription limits N times over.
+Prints: one JSON line — `group`, `spawned`, `requested`, `next` (the `result --group <name> --wait` call to run in the background, absent when nothing started), `runs` (per member its `index`, `label`, `run_id`, `state`, `cwd`, `worktree`, `profile`, or the `error` that kept it from starting), and `worktrees` when members got checkouts or `shared_tree` when several writers share one directory.
+Exits: 0 every member's start was tried, even when some failed (they carry `error`); 1 refused before anything started — the name is reserved, a worktree of that name is left from an earlier group, run from inside a worker; 2 the command line must change — a --group that breaks the naming rule, no task, a tasks file that cannot be read or a line that is not a valid task (an unknown field, a value outside its set, kind `resume` without `resume`), or anything else the parser refuses."""
+
+BATCH_EPILOG = f"""\
+Tasks file: one JSON object per line with the fields {', '.join(TASK_FIELDS)}. `kind` is `start` (default) or `resume`; a resume line names the run or session in `resume` — a next round is a batch of resume lines, one per member, after every member has ended.
+--worktree: a member gets its own git worktree (Claude Code's `--worktree <group>-<index>`, at .claude/worktrees/<group>-<index> on branch worktree-<group>-<index>) when it is a fresh start, its profile is write or auto, it has no cwd of its own, and the repository has a commit. The worktree starts from your local HEAD: none of your uncommitted changes, nothing git ignores except what .worktreeinclude copies. Moving changes back into your tree is yours to do; `clean` removes the worktrees afterwards. A resumed member stays in the directory its session ran in.
+Each member is told its group's name and size, and a worktree member where its checkout is, which commit it came from and how many uncommitted files your tree has."""
+
+CLEAN_DESC = """\
+Remove a group's worktrees and release its name once nothing of it is left. A worktree is removed only when that loses nothing: no change to a tracked file, and every untracked or ignored entry a .worktreeinclude copy or a file startup created that is unchanged since. A member's branch is deleted when it has no commits beyond the base, and never otherwise. Live work is never removed, --force or not.
+Prints: one JSON line — `group`, `removed` (per worktree its `path`, `branch`, and `branch_deleted` or `branch_kept`), `kept` (per worktree the `reason`, the paths that would be lost, `occupied_by` with the `stop` call when another live run works there), `name_released`, `forced`, and `note` when the name stays reserved.
+Exits: 0 cleaned as far as it could (`name_released` says whether all of it); 1 refused — no such group, a live member (`instead` stops the group), or run from inside a worker; 2 the command line must change — no --group."""
+
 STATUS_DESC = f"""\
-What the registry knows: every live run plus the {LISTING_ROWS} newest, or one run in full.
-Prints: one JSON line. With no selector: `registry`, `live` (run ids), `runs` (a short row each: `run_id`, `session_id`, `state`, `label`, `group`, `profile`, `model`, `idle_seconds`, `error`, `attention`, `last_message`), `runs_truncated`, `groups`, and the newest `rate_limit` any run observed. With --run: that run's full row — the above plus `stored_state`, `permission_mode`, `mode_mismatch`, `cwd`, `created`, `ended`, `elapsed_seconds`, `exit_code`, `in_progress` (calls without a result yet), `tasks_open`, `permission_denials`, `files_edited`, `tool_calls`, `messages`, `unanswered`, `undelivered`, `stdin_open`, `retrying_since`, `rate_limit`, `cost_usd`, `usage`, `profile_exceptions`, `stderr_tail` for a failure, `still_writing` when claude outlived its supervisor, `events`.
-Exits: 0 answered; 1 refused — no such run, an ambiguous prefix, or a meta.json that does not parse; 2 the command line must change."""
+What the registry knows: every live run plus the {LISTING_ROWS} newest, one run in full, or one group.
+Prints: one JSON line. With no selector: `registry`, `live` (run ids), `runs` (a short row each: `run_id`, `session_id`, `state`, `label`, `group`, `profile`, `model`, `idle_seconds`, `error`, `attention`, `last_message`), `runs_truncated`, `groups` (each with its `group_state`), and the newest `rate_limit` any run observed. With --group: `group`, `group_state`, `running`, `done`, `failed`, `unstarted`, and each member's full row. With --run: that run's full row — the above plus `stored_state`, `permission_mode`, `mode_mismatch`, `cwd`, `created`, `ended`, `elapsed_seconds`, `exit_code`, `in_progress` (calls without a result yet), `tasks_open`, `permission_denials`, `files_edited`, `tool_calls`, `messages`, `unanswered`, `undelivered`, `stdin_open`, `retrying_since`, `rate_limit`, `cost_usd`, `usage`, `profile_exceptions`, `stderr_tail` for a failure, `still_writing` when claude outlived its supervisor, `events`.
+Exits: 0 answered; 1 refused — no such run or group, an ambiguous prefix, or a meta.json or manifest that does not parse; 2 the command line must change — --run with --group."""
 
 STATUS_EPILOG = f"""\
 States:
@@ -75,26 +91,28 @@ States:
   interrupted  ended: stopped
   timed_out    ended: its --timeout passed
   orphaned     ended: its supervisor died without recording an outcome; `still_writing` says claude is still running
-`attention` lists what needs a look now: `stalled`, `retrying` for 120 s, `rate_limited` (a rejected rate limit), `finishing` for 120 s, `possibly_blocked`."""
+`attention` lists what needs a look now: `stalled`, `retrying` for 120 s, `rate_limited` (a rejected rate limit), `finishing` for 120 s, `possibly_blocked`.
+A group's `group_state` is `running` while any member is live, `completed` when every member completed, and `partial` otherwise — a failure, a stop, a timeout or a member that never started."""
 
 LOG_DESC = """\
 What one run did, read from its events.
 Prints: text, one line per event — `init model=… mode=… cwd=…` (again when either changes), `msg <text>` with the whole message, `bash exit=<n> out=<bytes>B <command>` with the head and tail of the output indented beneath a failure, `edit|write|read <path>`, `grep|glob <pattern>`, `fetch <url>`, `search <query>`, `skill <name>`, `agent <type> <description> tools=<n> out=<bytes>B`, `mcp <server>/<tool> ok|error`, `denied <tool> <input>`, `sent <priority> <message>`, `task <status> <description>`, `retry attempt=<a>/<max> error=<kind> status=<http>`, `ratelimit <status> 5h=<%> 7d=<%>` when the status changes, `compact`, `result <subtype> turns=<n> terminal=<reason> cost=$<x>` (with `origin=task-notification` for a background follow-up), `running <tool> <summary>` for calls still without a result — then `run=<id> state=<state>`.
 Exits: 0 printed; 1 refused — no such run; 2 the command line must change — no --run."""
 
-RESULT_DESC = """\
-What a run concluded: at once (partial while it is live), or with --wait once it ends or needs attention.
-Prints: a JSON header line — `run_id`, `session_id`, `state`, `exit_code`, `error`, `attention`, `answered` (the messages the answer replies to), `unanswered`, `last_message_unanswered`, `answer_unconfirmed` (claude did not say which message it answered), `blocked_by_hook`, `last_message_blocked`, `possibly_blocked`, `permission_denials`, `files_edited`, `files_edited_note`, `tool_calls`, `usage`, `cost_usd`, `followups` (background follow-up turns, not the answer), `mode_mismatch`, `profile_exceptions`, `message_bytes`, and `note` and `next` while the run is live — then the final message. A --schema run prints one indented JSON document instead, whose `json` is the structured output (null while starting or running). Once a run is `finishing` its answer is decided: the text and `json` are the answer, and `note` says claude is still running something.
-Exits: 0 printed, whatever the run's state, also when --wait-timeout passes; 1 refused — no such run, or a --schema run that ended without structured output (`message` carries its text); 2 the command line must change — no --run, --wait-timeout without --wait or not positive."""
+RESULT_DESC = f"""\
+What a run or a group concluded: at once (partial while live), or with --wait once it ends or needs attention.
+Prints: a JSON header line — `run_id`, `session_id`, `state`, `exit_code`, `error`, `attention`, `answered` (the messages the answer replies to), `unanswered`, `last_message_unanswered`, `answer_unconfirmed` (claude did not say which message it answered), `blocked_by_hook`, `last_message_blocked`, `possibly_blocked`, `permission_denials`, `files_edited`, `files_edited_note`, `tool_calls`, `usage`, `cost_usd`, `followups` (background follow-up turns, not the answer), `mode_mismatch`, `profile_exceptions`, `message_bytes`, and `note` and `next` while the run is live — then the final message. A --schema run prints one indented JSON document instead, whose `json` is the structured output (null while starting or running). Once a run is `finishing` its answer is decided: the text and `json` are the answer, and `note` says claude is still running something. For a group: a JSON header — `group`, `group_state`, `overlaps` (paths more than one member edited, with their indexes), `totals`, `attention` (members that need a look), `members` (each one's `state`, `bytes`, `shown_bytes`, counts) and `next` while live — then per member a `--- [<index>:<label>] run=<id> state=<state> bytes=<n>` line and its message cut to {GROUP_MESSAGE_CAP} B.
+Exits: 0 printed, whatever the state, also when --wait-timeout passes; 1 refused — no such run or group, or a --schema run that ended without structured output (`message` carries its text); 2 the command line must change — neither or both of --run and --group, --wait-timeout without --wait or not positive."""
 
 RESULT_EPILOG = f"""\
---wait returns early when attention appears that was not there when it began: no event for {STALL_SECONDS} s (`stalled`), API retries for 120 s (`retrying`), a rejected rate limit (`rate_limited`), claude still running 120 s after the answer (`finishing`), or a turn that ended with no reply and no hook notice (`possibly_blocked`). The header's `attention` says which, with what the run was doing; its `next` waits again for something new. Nothing is stopped for it.
+--wait on a group returns when every member has ended or any member has new attention. --wait returns early when attention appears that was not there when it began: no event for {STALL_SECONDS} s (`stalled`), API retries for 120 s (`retrying`), a rejected rate limit (`rate_limited`), claude still running 120 s after the answer (`finishing`), or a turn that ended with no reply and no hook notice (`possibly_blocked`). The header's `attention` says which, with what the run was doing; its `next` waits again for something new. Nothing is stopped for it.
 `files_edited` lists edit-tool calls; files a shell command wrote are not in it."""
 
 STOP_DESC = """\
 Stop runs through their recorded process groups, never by name: SIGINT, then SIGTERM after 10 s, then SIGKILL 3 s later. SIGINT first lets Claude Code end the turn so the session can be resumed.
+With --group, every member's newest run.
 Prints: one JSON line — `stopped`, an entry per run with `run_id`, `session_id`, `signals_sent` and `state` (`interrupted` for a run that was live; one that had ended keeps its state, with `note`).
-Exits: 0 every run was tried; 1 refused — run from inside a worker, or no such run; 2 the command line must change — no --run."""
+Exits: 0 every run was tried; 1 refused — run from inside a worker, or no such run or group; 2 the command line must change — neither or both of --run and --group."""
 
 
 class OneLinePerParagraph(argparse.HelpFormatter):
@@ -117,7 +135,7 @@ class OneLinePerParagraph(argparse.HelpFormatter):
         return super()._format_action(action)
 
 
-VISIBLE = ("start", "resume", "send", "status", "log", "result", "stop")
+VISIBLE = ("start", "resume", "send", "batch", "status", "log", "result", "stop", "clean")
 
 
 class ArgumentError(Exception):
@@ -183,22 +201,46 @@ def build_parser():
     p.add_argument("--interrupt", action="store_true", help="priority `now`: end the running turn and start on this message")
     add_registry(p)
 
-    p = sub.add_parser("status", usage="cli.py status [--run REF]", help="list runs, or show one run in full", description=STATUS_DESC, epilog=STATUS_EPILOG, formatter_class=OneLinePerParagraph)
-    p.add_argument("--run", metavar="REF", help="a run id, a session id, or a unique prefix of either")
+    p = sub.add_parser("batch", usage="cli.py batch --group NAME (--task PROMPT … | --tasks-file FILE) [--worktree] [--profile P] [options]", help="start several runs as one named group", description=BATCH_DESC, epilog=BATCH_EPILOG, formatter_class=OneLinePerParagraph)
+    p.add_argument("--group", metavar="NAME", required=True, help="the group's name: lowercase letters, digits and hyphens, at most 40; reserved until `clean`")
+    p.add_argument("--task", metavar="PROMPT", action="append", help="a member's prompt; repeat for several")
+    p.add_argument("--tasks-file", metavar="FILE", help="members as JSON lines (see below), after the --task ones")
+    p.add_argument("--worktree", action="store_true", help="give each fresh writing member its own git worktree (see below)")
+    p.add_argument("--profile", choices=PROFILES, help="the members' default profile (see start --help)")
+    p.add_argument("--model", help=f"the members' default model (default {DEFAULTS['model']})")
+    p.add_argument("--effort", choices=EFFORTS, help=f"the members' default effort (default {DEFAULTS['effort']})")
+    p.add_argument("--schema", metavar="FILE", help="the members' default JSON Schema file")
+    p.add_argument("--timeout", type=positive, metavar="SEC", help="stop each member after SEC seconds")
+    p.add_argument("--cwd", metavar="DIR", help="the members' default working directory (members with a cwd get no worktree)")
+    add_registry(p)
+
+    p = sub.add_parser("status", usage="cli.py status [--run REF | --group NAME]", help="list runs, or show one run or group", description=STATUS_DESC, epilog=STATUS_EPILOG, formatter_class=OneLinePerParagraph)
+    sel = p.add_mutually_exclusive_group()
+    sel.add_argument("--run", metavar="REF", help="a run id, a session id, or a unique prefix of either")
+    sel.add_argument("--group", metavar="NAME", help="a group's name")
     add_registry(p)
 
     p = sub.add_parser("log", usage="cli.py log --run REF", help="what one run did, as text", description=LOG_DESC, formatter_class=OneLinePerParagraph)
     p.add_argument("--run", metavar="REF", required=True, help="a run id, a session id, or a unique prefix of either")
     add_registry(p)
 
-    p = sub.add_parser("result", usage="cli.py result --run REF [--wait [--wait-timeout SEC]]", help="what a run concluded, now or once it ends", description=RESULT_DESC, epilog=RESULT_EPILOG, formatter_class=OneLinePerParagraph)
-    p.add_argument("--run", metavar="REF", required=True, help="a run id, a session id, or a unique prefix of either")
+    p = sub.add_parser("result", usage="cli.py result (--run REF | --group NAME) [--wait [--wait-timeout SEC]]", help="what a run or group concluded, now or once it ends", description=RESULT_DESC, epilog=RESULT_EPILOG, formatter_class=OneLinePerParagraph)
+    sel = p.add_mutually_exclusive_group(required=True)
+    sel.add_argument("--run", metavar="REF", help="a run id, a session id, or a unique prefix of either")
+    sel.add_argument("--group", metavar="NAME", help="a group's name")
     p.add_argument("--wait", action="store_true", help="block until the run ends or new attention appears")
     p.add_argument("--wait-timeout", type=positive, metavar="SEC", help="with --wait, give up after SEC seconds and print the partial result")
     add_registry(p)
 
-    p = sub.add_parser("stop", usage="cli.py stop --run REF [--run REF …]", help="interrupt runs", description=STOP_DESC, formatter_class=OneLinePerParagraph)
-    p.add_argument("--run", metavar="REF", action="append", required=True, help="a run to stop; repeat for several")
+    p = sub.add_parser("stop", usage="cli.py stop (--run REF [--run REF …] | --group NAME)", help="interrupt runs", description=STOP_DESC, formatter_class=OneLinePerParagraph)
+    sel = p.add_mutually_exclusive_group(required=True)
+    sel.add_argument("--run", metavar="REF", action="append", help="a run to stop; repeat for several")
+    sel.add_argument("--group", metavar="NAME", help="stop every member of this group")
+    add_registry(p)
+
+    p = sub.add_parser("clean", usage="cli.py clean --group NAME [--force]", help="remove a group's worktrees and release its name", description=CLEAN_DESC, formatter_class=OneLinePerParagraph)
+    p.add_argument("--group", metavar="NAME", required=True, help="the group to clean")
+    p.add_argument("--force", action="store_true", help="also remove worktrees holding uncommitted, untracked or ignored work, discarding it; live work and branches with commits are still kept")
     add_registry(p)
 
     p = sub.add_parser("__supervise", help=argparse.SUPPRESS)
@@ -262,8 +304,17 @@ def dispatch(args):
     if c == "send":
         emit(send(ref=args.ref, message=read_text(args.message, args.message_file, "send", "message"), interrupt=args.interrupt, cwd=base_dir(args), runs_dir=args.runs_dir))
         return 0
+    if c == "batch":
+        defaults = {"profile": args.profile, "model": args.model, "effort": args.effort, "schema": args.schema, "timeout": args.timeout, "cwd": run_flags(args)["cwd"]}
+        if args.schema and not Path(args.schema).expanduser().is_file():
+            raise Refusal(f"--schema {args.schema} is not a file", arguments=True, help="batch --help")
+        emit(batch(name=args.group, task_args=args.task, tasks_file=args.tasks_file, defaults=defaults, cwd=base_dir(args), use_worktrees=args.worktree, runs_dir=args.runs_dir))
+        return 0
+    if c == "clean":
+        emit(clean(name=args.group, cwd=base_dir(args), force=args.force, runs_dir=args.runs_dir))
+        return 0
     if c == "status":
-        emit(status(cwd=base_dir(args), ref=args.run, runs_dir=args.runs_dir))
+        emit(status(cwd=base_dir(args), ref=args.run, group=args.group, runs_dir=args.runs_dir))
         return 0
     if c == "log":
         sys.stdout.write(log(cwd=base_dir(args), ref=args.run, runs_dir=args.runs_dir))
@@ -271,10 +322,10 @@ def dispatch(args):
     if c == "result":
         if args.wait_timeout and not args.wait:
             raise Refusal("--wait-timeout needs --wait", arguments=True, help="result --help")
-        sys.stdout.write(result(cwd=base_dir(args), ref=args.run, wait_for=args.wait, wait_timeout=args.wait_timeout, runs_dir=args.runs_dir))
+        sys.stdout.write(result(cwd=base_dir(args), ref=args.run, group=args.group, wait_for=args.wait, wait_timeout=args.wait_timeout, runs_dir=args.runs_dir))
         return 0
     if c == "stop":
-        emit(stop(refs=args.run, cwd=base_dir(args), runs_dir=args.runs_dir))
+        emit(stop(refs=args.run or [], group=args.group, cwd=base_dir(args), runs_dir=args.runs_dir))
         return 0
     if c == "__supervise":
         return supervise(args.run_dir)

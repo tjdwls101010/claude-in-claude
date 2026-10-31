@@ -121,6 +121,38 @@ class Real(unittest.TestCase):
         proc = self.cli("result", "--run", again["run_id"], "--wait", "--wait-timeout", "300", cwd=project)
         self.assertIn("YES", proc.stdout.upper().split("\n", 1)[1])
 
+    def test_batch_worktrees_from_local_head_then_clean(self):
+        project = make_repo(self.root / "wt", {"README.md": "hi\n", ".gitignore": ".env\n", ".worktreeinclude": ".env\n"})
+        remote = self.root / "remote.git"
+        git(self.root, "init", "-q", "--bare", str(remote))
+        git(project, "remote", "add", "origin", str(remote))
+        git(project, "push", "-q", "origin", "main")
+        (project / "marker.txt").write_text("LOCAL-ONLY-COMMIT\n")
+        git(project, "add", "marker.txt")
+        git(project, "commit", "-q", "-m", "local only")
+        (project / ".env").write_text("TOKEN=abc\n")
+        reply = self.cli_json("batch", "--group", "smoke", "--worktree", "--profile", "write", "--model", MODEL, "--effort", "low",
+                              "--task", "Read marker.txt and .env in the current directory and quote both contents exactly. Do not change any file.",
+                              "--task", "Create a file named made.txt containing the word hi, then reply DONE.", cwd=project)
+        self.assertEqual(reply["spawned"], 2, reply)
+        proc = self.cli("result", "--group", "smoke", "--wait", "--wait-timeout", "500", cwd=project)
+        header, _, body = proc.stdout.partition("\n")
+        header = json.loads(header)
+        self.assertEqual(header["group_state"], "completed", header)
+        self.assertIn("LOCAL-ONLY-COMMIT", body, "the worktree starts from local HEAD, not the remote's main")
+        self.assertIn("TOKEN=abc", body, ".worktreeinclude copied .env")
+        wt1, wt2 = (project / ".claude" / "worktrees" / f"smoke-{i}" for i in (1, 2))
+        self.assertTrue((wt2 / "made.txt").exists())
+        self.assertFalse((project / "made.txt").exists(), "the writer stayed in its worktree")
+        kept = self.cli_json("clean", "--group", "smoke", cwd=project)
+        self.assertEqual([k["index"] for k in kept["kept"]], [2], kept)
+        self.assertIn("made.txt", kept["kept"][0]["untracked"])
+        self.assertFalse(wt1.exists(), "the read-only member left only startup artifacts and include copies")
+        forced = self.cli_json("clean", "--group", "smoke", "--force", cwd=project)
+        self.assertTrue(forced["name_released"], forced)
+        self.assertFalse(wt2.exists())
+        self.assertEqual(git(project, "branch", "--list", "--format=%(refname:short)", "worktree-smoke-*"), "")
+
 
 if __name__ == "__main__":
     unittest.main()

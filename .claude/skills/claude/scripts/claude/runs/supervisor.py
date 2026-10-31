@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from claude.claude_cli import PROFILES, StreamState, encode_user_message, final_result, read_events, worker_env
+from claude.git import startup_snapshot
 from claude.registry import TERMINAL, close, pending, read_meta, record_if_active, take, update_meta
 from claude.util import now, pid_alive, timings
 
@@ -54,8 +55,11 @@ def signal_ladder(pgid, pid, *, grace=None, kill_grace=None, on_signal=None):
 class Pump:
     """Reads claude's stdout line by line: appends each raw line to events.jsonl and feeds it to a StreamState."""
 
-    def __init__(self, proc, events_path):
+    def __init__(self, proc, events_path, on_first_init=None):
         self.proc = proc
+        self.on_first_init = on_first_init
+        self.first_init_result = None
+        self.init_done = threading.Event()  # set once the first init has been read and its callback has run
         self.state = StreamState()
         self.lock = threading.Lock()
         self.lines = 0
@@ -76,10 +80,16 @@ class Pump:
                 with self.lock:
                     self.lines += 1
                     self.last_line_at = now()
+                    first = isinstance(e, dict) and e.get("type") == "system" and e.get("subtype") == "init" and self.state.init is None
                     if isinstance(e, dict):
                         self.state.feed(e)
                     else:
                         self.state.unparsed += 1
+                if first:
+                    if self.on_first_init:
+                        # Right here, not on the next poll: the worker's first tool call is already on its way.
+                        self.first_init_result = self.on_first_init(self.state.init)
+                    self.init_done.set()
 
 
 def should_close(meta, pump, grace):
@@ -175,7 +185,17 @@ def supervise(run_dir):
         return 1
     update_meta(run_dir, lambda m: m.update({"claude_pid": proc.pid, "claude_pgid": proc.pid, "started_at": now()}))
     log(run_dir, f"claude pid {proc.pid}: {' '.join(meta['argv'][:3])} …")
-    pump = Pump(proc, Path(run_dir) / "events.jsonl")
+    wt = meta.get("worktree")
+
+    def snapshot(init):
+        if wt and meta.get("kind") == "start" and init.get("cwd"):
+            try:
+                return startup_snapshot(init["cwd"], wt.get("repo") or meta["launch_cwd"])
+            except OSError as e:
+                log(run_dir, f"startup snapshot failed: {e}")
+        return None
+
+    pump = Pump(proc, Path(run_dir) / "events.jsonl", on_first_init=snapshot)
     profile = meta["settings"]["profile"]
     seen_init = False
     rate_limit = None
@@ -200,13 +220,18 @@ def supervise(run_dir):
             except (BrokenPipeError, OSError) as e:
                 log(run_dir, f"stdin write failed: {e}")
         with pump.lock:
-            init = pump.state.init
+            init = pump.state.init if pump.init_done.is_set() else None
             rl = pump.state.rate_limit
             last_retry = pump.state.last_event_is_retry
         changes = {}
         if init and not seen_init:
             seen_init = True
             changes.update({"init": init, "state": "running", "mode_mismatch": init["permission_mode"] != EXPECTED_MODE.get(profile)})
+            if wt and meta.get("kind") == "start" and init.get("cwd"):
+                # The worktree's startup artifacts, taken once, at the first init of the run that created it: SessionStart hooks have run and no tool call has yet (J9).
+                changes["startup_artifacts"] = pump.first_init_result or {}
+                changes["cwd"] = init["cwd"]
+                changes["worktree"] = {**wt, "path": init["cwd"]}
             expect = meta.get("expect_cwd")
             if expect and init.get("cwd") and os.path.realpath(init["cwd"]) != os.path.realpath(expect):
                 changes["cwd_mismatch"] = f"cwd_mismatch: claude started in {init['cwd']}, not the recorded worktree {expect}; SessionStart hooks and the first tool call may already have run in the launch directory"

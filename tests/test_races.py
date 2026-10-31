@@ -104,3 +104,20 @@ class CliRaces(Sandbox):
             self.assertEqual(sorted(m["uuid"] for m in call["messages"][1:]), sorted(a["message_uuid"] for a in accepted))
         self.assertGreater(accepted_total, 0, "no send reached a live run: the test raced nothing")
         self.assertGreater(refused_total, 0, "no send met a closed run: the test raced nothing")
+
+    def test_two_batches_with_one_name(self):
+        import threading
+
+        out = []
+
+        def go(i):
+            out.append(self.cli("batch", "--group", "same", "--task", f"t{i}", timeout=120))
+
+        threads = [threading.Thread(target=go, args=(i,)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(sorted(p.returncode for p in out), [0, 1], [p.stdout for p in out])
+        self.assertIn("reserved", json.loads(next(p for p in out if p.returncode == 1).stdout)["error"])
+        self.assertEqual(self.cli_json("status", "--group", "same")["group_state"] in ("running", "completed"), True)

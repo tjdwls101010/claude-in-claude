@@ -72,5 +72,61 @@ class Repo(unittest.TestCase):
         self.assertEqual(top, top.__class__(__import__("unicodedata").normalize("NFC", top)))
 
 
+
+class Worktree(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.repo = make_repo(self.root / "repo", {"a.txt": "a\n", ".gitignore": ".env\nbuild/\n"})
+        (self.repo / ".env").write_text("SECRET=1\n")
+        self.base = git(self.repo, "rev-parse", "HEAD")
+        self.wt = self.root / "repo" / ".claude" / "worktrees" / "g-1"
+        git(self.repo, "worktree", "add", "-q", "-b", "worktree-g-1", str(self.wt), "HEAD")
+        git(self.repo, "worktree", "lock", str(self.wt))
+        (self.wt / ".env").write_text("SECRET=1\n")  # a .worktreeinclude copy
+        (self.wt / ".claude").mkdir(exist_ok=True)
+        os.symlink("/somewhere", self.wt / ".claude" / "histories")
+
+    def test_entries(self):
+        entries = {e["path"]: e for e in g.worktree_entries(str(self.repo))}
+        self.assertEqual(entries[str(self.wt)]["branch"], "worktree-g-1")
+        self.assertTrue(entries[str(self.wt)]["locked"])
+        self.assertTrue(g.is_worktree(str(self.repo), str(self.wt)))
+        self.assertFalse(g.is_worktree(str(self.repo), str(self.root)))
+        self.assertTrue(g.branch_exists(str(self.repo), "worktree-g-1"))
+
+    def test_startup_snapshot_leaves_out_include_copies(self):
+        snap = g.startup_snapshot(str(self.wt), str(self.repo))
+        self.assertEqual(snap, {".claude/histories": ["link", "/somewhere"]})
+
+    def test_leftovers(self):
+        snap = g.startup_snapshot(str(self.wt), str(self.repo))
+        self.assertEqual(g.leftovers(str(self.wt), str(self.repo), snap), {"tracked": [], "untracked": [], "ignored": []})
+        (self.wt / "a.txt").write_text("changed\n")
+        (self.wt / "new" / "deep").mkdir(parents=True)
+        (self.wt / "new" / "deep" / "f.txt").write_text("")
+        (self.wt / "build").mkdir()
+        (self.wt / "build" / "o").write_text("")
+        (self.wt / ".env").write_text("SECRET=2\n")
+        os.unlink(self.wt / ".claude" / "histories")
+        os.symlink("/elsewhere", self.wt / ".claude" / "histories")
+        left = g.leftovers(str(self.wt), str(self.repo), snap)
+        self.assertEqual(left["tracked"], ["a.txt"])
+        self.assertEqual(sorted(left["untracked"]), [".claude/histories", "new/deep/f.txt"])
+        self.assertEqual(sorted(left["ignored"]), [".env", "build/o"])
+
+    def test_commits_beyond_and_removal(self):
+        self.assertEqual(g.commits_beyond(str(self.repo), "worktree-g-1", self.base), 0)
+        (self.wt / "b.txt").write_text("b\n")
+        git(self.wt, "add", "b.txt")
+        git(self.wt, "commit", "-q", "-m", "b")
+        self.assertEqual(g.commits_beyond(str(self.repo), "worktree-g-1", self.base), 1)
+        ok, err = g.unlock_and_remove(str(self.repo), str(self.wt), force=True)
+        self.assertTrue(ok, err)
+        self.assertFalse(self.wt.exists())
+        self.assertTrue(g.delete_branch(str(self.repo), "worktree-g-1")[0])
+        self.assertFalse(g.branch_exists(str(self.repo), "worktree-g-1"))
+
+
 if __name__ == "__main__":
     unittest.main()

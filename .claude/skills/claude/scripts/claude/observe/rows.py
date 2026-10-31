@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from claude.claude_cli import final_result, read_events, summarize
-from claude.registry import ACTIVE, TERMINAL, claude_alive, reap
+from claude.registry import ACTIVE, TERMINAL, claude_alive, find_run, group_view, is_live, reap
 from claude.util import TIMINGS, iso, now, timings
 
 STALL_SECONDS = int(TIMINGS["stall"])
@@ -125,3 +125,33 @@ def listing_row(row):
     out = {k: row[k] for k in keep}
     out["last_message"] = (row["last_message"] or "")[:120] or None
     return out
+
+
+def member_dirs(runs_dir, manifest):
+    """(member, run_dir of the member's newest run or None) for each member of a group."""
+    out = []
+    for m in manifest.get("members") or []:
+        d = None
+        ref = m.get("session_id") or m.get("run_id")
+        if ref:
+            try:
+                d = find_run(runs_dir, ref)
+            except Exception:
+                d = None
+        out.append((m, d))
+    return out
+
+
+def group_state(states):
+    """`running` while any member is live, `completed` when every member completed, `partial` otherwise."""
+    if any(s not in TERMINAL for s in states):
+        return "running"
+    if states and all(s == "completed" for s in states):
+        return "completed"
+    return "partial"
+
+
+def group_rows(runs_dir, name, at=None):
+    """(manifest, [(member, row or None)]) for a group."""
+    manifest = group_view(runs_dir, name)
+    return manifest, [(m, run_row(d, at) if d else None) for m, d in member_dirs(runs_dir, manifest)]
