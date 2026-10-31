@@ -9,7 +9,7 @@ import unittest
 
 from support.harness import ENTRY, Sandbox, build_parser
 
-COMMANDS = ("start", "status", "log", "result", "stop")
+COMMANDS = ("start", "resume", "send", "status", "log", "result", "stop")
 
 
 def run(*args):
