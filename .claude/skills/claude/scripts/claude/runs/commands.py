@@ -133,7 +133,9 @@ def stop_one(run_dir):
         return entry
     if meta.get("state") not in TERMINAL:
         time.sleep(timings()["pause_before_stop_mark"])
-        update_meta(run_dir, lambda m: m.update({"stop_requested": now()}) if m.get("state") not in TERMINAL else None)
+        # Set under the run's lock and read back with the pid: a supervisor that records claude's pid after this sees the request and stops claude itself (K25).
+        meta = update_meta(run_dir, lambda m: m.update({"stop_requested": now()}) if m.get("state") not in TERMINAL else None)
+        still = claude_alive(meta)
     pgid, pid = meta.get("claude_pgid"), meta.get("claude_pid")
     command = process_command(pid) if pid else None
     if pgid and pid and still and not ("claude" in (command or "") and "stream-json" in (command or "")):

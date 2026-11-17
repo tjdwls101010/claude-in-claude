@@ -179,14 +179,28 @@ def supervise(run_dir):
     env = worker_env(dict(os.environ), meta["run_id"])
     stderr_file = open(Path(run_dir) / "stderr.log", "ab")
     time.sleep(t["pause_before_launch"])
+
+    def stopped_before_launch(m):
+        # `stop` finds no claude to signal until its pid is recorded, so a stop that came first is honoured here: nothing is launched (K25).
+        if m.get("stop_requested") and m.get("state") not in TERMINAL:
+            m.update({"state": "interrupted", "error": "stopped", "ended_at": now(), "stdin_open": False})
+
+    if update_meta(run_dir, stopped_before_launch).get("state") in TERMINAL:
+        log(run_dir, "stopped before claude was launched")
+        stderr_file.close()
+        return 0
     try:
         proc = subprocess.Popen(meta["argv"], cwd=meta["launch_cwd"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr_file, env=env, start_new_session=True)
     except OSError as e:
         record_if_active(run_dir, {"state": "failed", "error": f"could not start claude: {e}", "ended_at": now(), "stdin_open": False})
         return 1
     time.sleep(t["pause_before_pid"])
-    update_meta(run_dir, lambda m: m.update({"claude_pid": proc.pid, "claude_pgid": proc.pid, "started_at": now()}))
+    # The pid is recorded and the stop request read under one lock, as `stop` sets the request and reads the pid under it: whichever comes second sees the other.
+    recorded = update_meta(run_dir, lambda m: m.update({"claude_pid": proc.pid, "claude_pgid": proc.pid, "started_at": now()}))
     log(run_dir, f"claude pid {proc.pid}: {' '.join(meta['argv'][:3])} …")
+    if recorded.get("stop_requested") or recorded.get("state") in TERMINAL:
+        log(run_dir, "stopped while claude was launching")
+        signal_ladder(proc.pid, proc.pid)
     wt = meta.get("worktree")
 
     def snapshot(init):
