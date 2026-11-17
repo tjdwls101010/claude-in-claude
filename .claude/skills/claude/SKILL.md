@@ -52,5 +52,5 @@ A batch is for when N workers should be one name you watch, collect and stop. **
 - `doctor` checks the environment without starting a worker. A run that fails says why in `status --run <id>` (`error`, `stderr_tail`).
 - `mode_mismatch` means the worker did not start in its profile's permission mode (auto on a model without auto mode): treat what it may do as unknown.
 - To look inside a worker's session yourself, once it has ended: `claude --resume <session_id>` in its directory.
-- A scheduled run that ends red says why in its summary's first alert, or, when there is no summary, in the job's step log. `Not logged in` there is the runner's service, not the worker: `doctor`'s `schedule.runners.problems` says what to change.
+- A scheduled run that ends red says why in its summary's first alert; without a summary, in the job's log, and a job no runner took fails on its run page after waiting. `Not logged in` there is the runner's service, not the worker: `doctor`'s `schedule.runners.problems` names what it can see from here, which is not whether a token in the runner's `.env` still works.
 - If the command itself is not found: without `uv` nothing here runs, and installing it is the fix; with `uv`, the skill's path did not resolve: `ls "${CLAUDE_SKILL_DIR}/scripts"`.
