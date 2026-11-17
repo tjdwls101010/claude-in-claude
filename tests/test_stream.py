@@ -152,6 +152,31 @@ class Log(unittest.TestCase):
         self.assertEqual(lines[-1], "running Bash python3 -c 'import time; time.sleep(25); print(42)'")
 
 
+class ActivityRowTimes(unittest.TestCase):
+    """A row's time is when the call was made: the timestamp of the assistant event that made it, never a later result's, and None when that event has none."""
+
+    def use(self, tid, name, inp, ts=None):
+        e = {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}]}}
+        if ts:
+            e["timestamp"] = ts
+        return e
+
+    def result(self, tid, ts):
+        return {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tid, "content": "ok"}]}, "tool_use_result": {"stdout": "ok", "stderr": ""}, "timestamp": ts}
+
+    def test_a_finished_call_keeps_its_call_time(self):
+        rows = cli.activity_rows([self.use("t1", "Bash", {"command": "ls"}, "2026-11-17T02:54:47.715Z"), self.result("t1", "2026-11-17T02:55:30.000Z")])
+        self.assertEqual([(r["kind"], r["time"]) for r in rows], [("bash", "2026-11-17T02:54:47.715Z")])
+
+    def test_a_call_without_a_timestamp_has_no_time(self):
+        rows = cli.activity_rows([self.use("t1", "Bash", {"command": "ls"}), self.result("t1", "2026-11-17T02:55:30.000Z")])
+        self.assertEqual([(r["kind"], r["time"]) for r in rows], [("bash", None)])
+
+    def test_a_running_call_keeps_its_call_time(self):
+        rows = cli.activity_rows([self.use("t1", "Bash", {"command": "sleep 99"}, "2026-11-17T02:54:47.715Z")])
+        self.assertEqual([(r["kind"], r["time"]) for r in rows], [("running", "2026-11-17T02:54:47.715Z")])
+
+
 class FinalResult(unittest.TestCase):
     def test_merged_messages_answer_with_the_last_turn(self):
         u2, u3 = full_uuid("2c350dca"), full_uuid("18b18546")

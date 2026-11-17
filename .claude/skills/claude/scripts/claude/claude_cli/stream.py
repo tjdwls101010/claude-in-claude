@@ -377,7 +377,7 @@ TOOL_KINDS = {"Edit": "edit", "NotebookEdit": "edit", "Write": "write", "Read": 
 def activity_rows(events, rel_to=None, messages=()):
     """What the run did as rows, one per event that matters, in order: `init`, `msg` (the whole message), one row per tool call — `bash`, `read`, `edit`, `write`, `grep`, `glob`, `fetch`, `search`, `skill`, `agent`, `mcp`, or `tool` for any other — `denied`, `sent` (a message sent into the run, placed where it was delivered), `task`, `retry`, `ratelimit` (when its status changes), `compact`, `result`, and finally `running` for calls still without a result.
 
-    Every row has `kind`, `index` (its event's position, None for `sent` and `running`) and `time` (the ISO timestamp of the event that made the call or wrote the message, None where the stream gives none). A tool call's `detail` is its one-line target (a command, a path relative to `rel_to`, a pattern, a URL); `bash` adds `exit` (None when unknown), `bytes` and the whole `output`; the others add `error`."""
+    Every row has `kind`, `index` (its event's position, None for `sent` and `running`) and `time`: for a call (`denied` and `running` included) the ISO timestamp of the event that made it, for a message the event that wrote it, None where that event has none. A tool call's `detail` is its one-line target (a command, a path relative to `rel_to`, a pattern, a URL); `bash` adds `exit` (None when unknown), `bytes` and the whole `output`; the others add `error`."""
     state = StreamState()
     for e in events:
         state.feed(e)
@@ -401,10 +401,10 @@ def activity_rows(events, rel_to=None, messages=()):
             row["text"] = payload
         elif kind == "bash":
             code, text, cmd, tid = payload
-            row.update({"time": state.use_times.get(tid) or row["time"], "detail": cmd, "exit": code, "bytes": len(text.encode("utf-8", "replace")), "output": text})
+            row.update({"time": state.use_times.get(tid), "detail": cmd, "exit": code, "bytes": len(text.encode("utf-8", "replace")), "output": text})
         elif kind == "tool":
             name, inp, is_error, text, tid = payload
-            row.update({"time": state.use_times.get(tid) or row["time"], "tool": name, "detail": _tool_summary(name, inp, rel_to), "error": is_error})
+            row.update({"time": state.use_times.get(tid), "tool": name, "detail": _tool_summary(name, inp, rel_to), "error": is_error})
             if name in TOOL_KINDS:
                 row["kind"] = TOOL_KINDS[name]
             elif name in AGENT_TOOLS:
@@ -414,7 +414,7 @@ def activity_rows(events, rel_to=None, messages=()):
                 row.update({"kind": "mcp", "server": parts[1] if len(parts) > 1 else "?", "name": "__".join(parts[2:]) or "?"})
         elif kind == "denied":
             tool, inp, tid = payload
-            row.update({"time": state.use_times.get(tid) or row["time"], "tool": tool, "input": inp})
+            row.update({"time": state.use_times.get(tid), "tool": tool, "input": inp})
         elif kind == "task":
             row["status"], row["description"] = payload
         elif kind == "retry":
@@ -426,7 +426,7 @@ def activity_rows(events, rel_to=None, messages=()):
         rows.append(row)
     flush_sent(float("inf"))
     for p in state.in_progress():
-        rows.append({"kind": "running", "index": None, "time": None, "tool": p["tool"], "detail": p["summary"]})
+        rows.append({"kind": "running", "index": None, "time": state.use_times.get(p["tool_use_id"]), "tool": p["tool"], "detail": p["summary"]})
     return rows
 
 
