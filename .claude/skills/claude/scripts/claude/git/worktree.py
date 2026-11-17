@@ -8,7 +8,7 @@ from pathlib import Path
 
 from claude.util import nfc
 
-from .repo import current_branch, head_commit, run_git
+from .repo import current_branch, head_commit, run_git, toplevel
 
 
 def worktree_entries(repo):
@@ -162,9 +162,10 @@ def branch_exists(repo, branch):
 
 
 def status_snapshot(path):
-    """The checkout at `path` as a scheduled run compares it before and after its worker (K27): `branch` (None when detached), `head`, and `entries`, every changed or untracked path — ignored files and .claude/worktrees left out — with its two-letter `status` and the `fingerprint` of what is there now. None outside a work tree."""
-    code, out, _ = run_git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".", ":(exclude).claude/worktrees")
-    if code != 0:
+    """The checkout at `path` as a scheduled run compares it before and after its worker (K27): `root` (the checkout's top level, which `entries` are relative to), `branch` (None when detached), `head`, and `entries`, every changed or untracked path under `path` — ignored files and .claude/worktrees left out — with its two-letter `status` and the `fingerprint` of what is there now. None outside a work tree."""
+    root = toplevel(path)
+    code, out, _ = run_git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".", ":(exclude,top).claude/worktrees")
+    if code != 0 or root is None:
         return None
     entries = {}
     parts = out.split("\0")
@@ -177,17 +178,22 @@ def status_snapshot(path):
         xy, rel = item[:2], nfc(item[3:])
         if xy[0] in "RC":
             i += 1  # the rename's source follows as its own field
-        entries[rel] = {"status": xy, "fingerprint": fingerprint(Path(path) / rel)}
-    return {"branch": current_branch(path), "head": head_commit(path), "entries": entries}
+        entries[rel] = {"status": xy, "fingerprint": fingerprint(Path(root) / rel)}
+    return {"root": root, "branch": current_branch(path), "head": head_commit(path), "entries": entries}
 
 
 def numstat(path, paths):
-    """Lines added and deleted against HEAD, staged and unstaged together, for each of `paths` git reports: `{path: [added, deleted]}`, or None for a binary file."""
-    if not paths:
+    """Lines added and deleted against HEAD, staged and unstaged together, for each of `paths` (relative to the checkout's top level, as `status_snapshot` gives them) git reports: `{path: [added, deleted]}`, or None for a binary file."""
+    root = toplevel(path)
+    if not paths or root is None:
         return {}
-    code, out, _ = run_git(path, "diff", "HEAD", "--numstat", "-z", "--no-renames", "--", *paths)
+    code, out, _ = run_git(root, "diff", "HEAD", "--numstat", "-z", "--no-renames", "--", *paths)
     if code != 0:
         return {}
+    return _numstat_lines(out)
+
+
+def _numstat_lines(out):
     result = {}
     for item in out.split("\0"):
         fields = item.split("\t", 2)
@@ -196,3 +202,17 @@ def numstat(path, paths):
         added, deleted, rel = fields
         result[nfc(rel)] = None if added == "-" else [int(added), int(deleted)]
     return result
+
+
+def committed_files(path, base, head):
+    """The files commits from `base` to `head` changed, in the repository at `path`: `[{status, path, lines}]` — `status` A, M or D, `lines` [added, deleted] or None for a binary file — in path order."""
+    if not base or not head or base == head:
+        return []
+    code, out, _ = run_git(path, "diff", "--name-status", "-z", "--no-renames", base, head)
+    if code != 0:
+        return []
+    parts = out.split("\0")
+    changed = [(parts[i][:1], nfc(parts[i + 1])) for i in range(0, len(parts) - 1, 2) if parts[i]]
+    code, out, _ = run_git(path, "diff", "--numstat", "-z", "--no-renames", base, head)
+    counts = _numstat_lines(out) if code == 0 else {}
+    return [{"status": st, "path": rel, "lines": counts.get(rel)} for st, rel in sorted(changed, key=lambda x: x[1])]

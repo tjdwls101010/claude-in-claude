@@ -60,12 +60,17 @@ def _size(n):
     return f"{n / 1024 / 1024:.1f} MB"
 
 
-def _code(text):
-    """Inline code that survives backticks and table pipes."""
-    text = text.replace("|", "\\|")
+def _code(text, table=False):
+    """Inline code that survives backticks, and in a table cell its pipes (GitHub drops the backslash there, and shows it anywhere else)."""
+    if table:
+        text = text.replace("|", "\\|")
     if "`" not in text:
         return f"`{text}`"
     return f"`` {text} ``"
+
+
+def _cell(text):
+    return str(text).replace("|", "\\|")
 
 
 def _one_line(text, limit=DETAIL_CHARS):
@@ -273,15 +278,25 @@ def _changes(snapshot, context):
             what = "(deleted)"
         else:
             what = ""
-        lines.append(f"{f['status']} {f['path'].ljust(width)}  {what}".rstrip())
+        if f.get("committed"):
+            what = (what + " committed").strip()
+        lines.append(f"{f['status'].ljust(2)} {f['path'].ljust(width)}  {what}".rstrip())
     where = ch.get("where") or "the project checkout"
-    head = f"<b>Changes</b> · {len(files)} file{'s' if len(files) != 1 else ''} changed during the run in {where}, uncommitted"
+    committed = sum(1 for f in files if f.get("committed"))
+    state = "" if not files else (", uncommitted" if not committed else (", committed" if committed == len(files) else f", {committed} of them committed"))
+    head = f"<b>Changes</b> · {len(files)} file{'s' if len(files) != 1 else ''} changed during the run in {where}{state}"
     body = [_fence("\n".join(lines), "text")] if lines else ["Nothing changed."]
+    moved = ch.get("head_moved")
+    if moved:
+        body.append(f"HEAD moved during the run: {_code(moved['from'])} → {_code(moved['to'])}, {moved['commits']} commit{'s' if moved['commits'] != 1 else ''}.")
     if ch.get("not_git"):
         body = ["Not a git checkout, so only what the edit tools wrote is known; files a shell command wrote are not here:", "\n".join(f"- {_code(p)}" for p in ch["not_git"]) or "- none"]
     if ch.get("kept"):
         k = ch["kept"]
         body.append(f"The worktree is kept because it holds these changes: {_code(k['path'])} on branch {_code(k['branch'])}. Move what you need into your tree, then `{k['clean']}`.")
+    elif ch.get("branch_kept"):
+        b = ch["branch_kept"]
+        body.append(f"The worktree was removed; its branch {_code(b['branch'])} keeps the commits (`git log {b['branch']}`).")
     elif ch.get("removed"):
         body.append("The worktree had nothing to keep and was removed.")
     if not ch.get("not_git") and ch.get("kind") != "worktree":
@@ -311,20 +326,20 @@ def _step_cell(row):
 def _detail_cell(row):
     k = row["kind"]
     if k == "denied":
-        return f"{_code(row['tool'] or '?')} {_code(_one_line(_target(row['tool'], row['input'])))}"
+        return f"{_code(row['tool'] or '?', True)} {_code(_one_line(_target(row['tool'], row['input'])), True)}"
     if k == "mcp":
-        return _code(f"{row['server']}/{row['name']}")
+        return _code(f"{row['server']}/{row['name']}", True)
     if k == "tool":
-        return f"{_code(row['tool'] or '?')} {_code(_one_line(row['detail']))}"
+        return f"{_code(row['tool'] or '?', True)} {_code(_one_line(row['detail']), True)}"
     if k == "retry":
-        return f"attempt {row['attempt']}/{row['max_retries']} · {row['error']} {row['error_status'] or ''}".rstrip()
+        return _cell(f"attempt {row['attempt']}/{row['max_retries']} · {_one_line(row['error'])} {row['error_status'] or ''}".rstrip())
     if k == "task":
-        return f"{row['status']} {_one_line(row['description'])}"
+        return _cell(f"{row['status']} {_one_line(row['description'])}")
     if k == "result":
         return f"{row['subtype']} · {row['num_turns']} turns"
     if k == "compact":
         return "the conversation was compacted"
-    return _code(_one_line(row.get("detail") or ""))
+    return _code(_one_line(row.get("detail") or ""), True)
 
 
 def _activity(snapshot, context, cuts):
@@ -355,7 +370,7 @@ def _activity(snapshot, context, cuts):
             data = out.encode("utf-8")
             if len(data) > 2 * EXCERPT_BYTES:
                 out = trim_bytes(out, EXCERPT_BYTES) + "\n…\n" + data[-EXCERPT_BYTES:].decode("utf-8", "ignore")
-            block = f"**#{numbered[id(r)]}** exited {r['exit']}:\n\n{_fence(out)}"
+            block = f"**#{numbered[id(r)]}** exited {r['exit']}:\n\n{_fence(trim_bytes(out, max(0, budget - 200)))}"
             budget -= len(block.encode("utf-8"))
             below.append(block)
     final = (snapshot.get("text") or "").strip()
@@ -364,7 +379,11 @@ def _activity(snapshot, context, cuts):
         if id(r) in numbered:
             last_n = numbered[id(r)]
         elif r["kind"] == "msg" and r["text"].strip() != final and budget > 0:
-            block = f"**After #{last_n}:** {r['text'].strip()}" if last_n else f"**Before the first call:** {r['text'].strip()}"
+            text = r["text"].strip()
+            if len(text.encode("utf-8")) > budget:
+                text = trim_bytes(text, max(0, budget - 200)) + " …"
+                cuts.append(f"A message from the worker was cut; `{context['log_call']}` prints all of them")
+            block = f"**After #{last_n}:** {text}" if last_n else f"**Before the first call:** {text}"
             budget -= len(block.encode("utf-8"))
             below.append(block)
     init = next((r for r in rows if r["kind"] == "init"), None)
@@ -434,6 +453,10 @@ def render_summary(snapshot, context):
     if cuts:
         parts.append("> [!NOTE]\n" + _quote(cuts))
     text = "\n\n".join(parts) + "\n"
+    if len(text.encode("utf-8")) > TOTAL_BYTES:
+        # Within the section limits this cannot happen; should it, the activity goes before anything is cut blindly.
+        parts = [p for p in parts if "<b>Activity</b>" not in p] + [f"> [!NOTE]\n> The activity was left out to fit GitHub's step summary limit; `{context.get('log_call')}` prints it."]
+        text = "\n\n".join(parts) + "\n"
     if len(text.encode("utf-8")) > TOTAL_BYTES:
         text = trim_bytes(text, TOTAL_BYTES) + "\n\n…cut to fit GitHub's step summary limit\n"
     return text

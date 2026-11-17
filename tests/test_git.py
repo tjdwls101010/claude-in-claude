@@ -170,6 +170,29 @@ class TreeSnapshot(unittest.TestCase):
         self.assertIsNone(g.status_snapshot(str(self.root / "plain")))
         self.assertIsNone(g.current_branch(str(self.root / "plain")))
 
+    def test_a_project_in_a_subdirectory(self):
+        import hashlib
+
+        (self.repo / "sub").mkdir()
+        (self.repo / "sub" / "x.txt").write_text("one\n")
+        git(self.repo, "add", "sub/x.txt")
+        git(self.repo, "commit", "-q", "-m", "sub")
+        (self.repo / "sub" / "x.txt").write_text("two\n")
+        snap = g.status_snapshot(str(self.repo / "sub"))
+        self.assertEqual(snap["root"], str(self.repo))
+        self.assertEqual(snap["entries"]["sub/x.txt"]["fingerprint"], ["file", hashlib.sha256(b"two\n").hexdigest()])
+        self.assertEqual(g.numstat(str(self.repo / "sub"), ["sub/x.txt"]), {"sub/x.txt": [1, 1]})
+
+    def test_files_committed_between_two_commits(self):
+        base = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "a.txt").write_text("a\nmore\n")
+        (self.repo / "c.txt").write_text("c1\nc2\nc3\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "work")
+        head = git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(g.committed_files(str(self.repo), base, head), [{"status": "M", "path": "a.txt", "lines": [1, 0]}, {"status": "A", "path": "c.txt", "lines": [3, 0]}])
+        self.assertEqual(g.committed_files(str(self.repo), head, head), [])
+
     def test_numstat_counts_staged_and_unstaged_changes_against_head(self):
         (self.repo / "a.txt").write_text("a\nmore\n")
         (self.repo / "b.txt").write_text("b1\n")

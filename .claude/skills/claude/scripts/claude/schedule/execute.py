@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 from claude.batch import batch, clean
 from claude.claude_cli import auth_status, claude_version, render_rows, sandbox_prereqs, version_floor_check
 from claude.errors import Refusal
-from claude.git import head_commit, numstat, status_snapshot, toplevel
+from claude.git import commits_beyond, committed_files, head_commit, numstat, status_snapshot, toplevel
 from claude.github import JOB_HANDLES, annotation, job_context, resume_commands, stop_commands, write_output, write_summary
 from claude.observe import snapshot, wait_ended
 from claude.registry import claim_slot, claude_alive, find_by_origin_job, group_view, is_live, read_job, reap, record_job, resolve_runs_dir, schedule_dir, update_job
@@ -242,7 +242,7 @@ def scheduled_run(spec, env, write):
 
 
 def _changes(spec, rec, meta, edited):
-    """What changed during the run (K27): against the snapshot the Run step took before the worker, for a run in the project checkout; everything in its worktree, which starts clean. `edited` (the edit tools' files) stands in where git cannot tell."""
+    """What changed during the run (K27): against the snapshot the Run step took before the worker, for a run in the project checkout; against its base commit, for a run in its own worktree. Commits the worker made count as changes and say so. `edited` (the edit tools' files) stands in where git cannot tell."""
     wt = meta.get("worktree")
     if wt and wt.get("path"):
         snap = status_snapshot(wt["path"])
@@ -250,7 +250,9 @@ def _changes(spec, rec, meta, edited):
             return {"where": "the worktree", "kind": "worktree", "files": []}
         paths = sorted(snap["entries"])
         counts = numstat(wt["path"], [p for p in paths if snap["entries"][p]["status"] != "??"])
-        return {"where": "the worktree", "kind": "worktree", "files": [_file(wt["path"], p, snap["entries"][p], counts) for p in paths]}
+        files = [{**f, "committed": True} for f in committed_files(snap["root"], wt.get("base"), snap["head"])]
+        files += [_file(snap["root"], p, snap["entries"][p], counts) for p in paths]
+        return {"where": "the worktree", "kind": "worktree", "files": files}
     project = spec["project"]
     before = (rec or {}).get("tree_before")
     after = status_snapshot(project)
@@ -259,17 +261,20 @@ def _changes(spec, rec, meta, edited):
     paths = sorted(p for p in set(before["entries"]) | set(after["entries"]) if before["entries"].get(p) != after["entries"].get(p))
     fresh = [p for p in paths if p in after["entries"] and p not in before["entries"] and after["entries"][p]["status"] != "??"]
     counts = numstat(project, fresh)
-    files = []
+    out = {"where": "the project checkout", "files": []}
+    if before.get("head") != after.get("head") and before.get("head") and after.get("head"):
+        landed = committed_files(after["root"], before["head"], after["head"])
+        out["files"] += [{**f, "committed": True} for f in landed]
+        out["head_moved"] = {"from": f"{before.get('branch') or 'detached'} @ {before['head'][:7]}", "to": f"{after.get('branch') or 'detached'} @ {after['head'][:7]}", "commits": commits_beyond(after["root"], after["head"], before["head"]) or 0}
     for p in paths:
         if p not in after["entries"]:
-            files.append({"status": "  ", "path": p, "note": "no longer changed: reverted or committed"})
+            if not any(f["path"] == p for f in out["files"]):
+                out["files"].append({"status": "  ", "path": p, "note": "no longer changed: reverted or committed"})
         elif p in before["entries"]:
-            files.append({"status": after["entries"][p]["status"], "path": p, "note": "already modified before the run"})
+            out["files"].append({"status": after["entries"][p]["status"], "path": p, "note": "already modified before the run"})
         else:
-            files.append(_file(project, p, after["entries"][p], counts))
-    if (before.get("head"), before.get("branch")) != (after.get("head"), after.get("branch")):
-        files.append({"status": "->", "path": f"{before.get('branch') or 'detached'} @ {(before.get('head') or '')[:7]} → {after.get('branch') or 'detached'} @ {(after.get('head') or '')[:7]}", "note": "HEAD moved during the run"})
-    return {"where": "the project checkout", "files": files}
+            out["files"].append(_file(after["root"], p, after["entries"][p], counts))
+    return out
 
 
 def _file(root, rel, entry, counts):
@@ -282,6 +287,26 @@ def _file(root, rel, entry, counts):
     elif counts.get(rel):
         f["lines"] = counts[rel]
     return f
+
+
+def _clean_group(group, job, registry, project, warnings):
+    """K10: clean the worktree group this job created — and only one whose manifest names this job, never a name another batch holds — removing a worktree that holds nothing and releasing the name. Returns what the summary says of it; failures go to `warnings`."""
+    if not group:
+        return {}
+    try:
+        if (group_view(registry, group).get("origin") or {}).get("job") != job:
+            return {}
+        result = clean(name=group, cwd=project, runs_dir=registry)
+    except Refusal as e:
+        warnings.append(f"The worktree was not cleaned up ({e.message}); `{invocation('clean', '--group', group, '--project', project)}` does it.")
+        return {}
+    if result["kept"]:
+        k = result["kept"][0]
+        return {"kept": {"path": k["path"], "branch": k["branch"], "clean": invocation("clean", "--group", group, "--project", project)}}
+    kept_branch = next((r["branch_kept"] for r in result["removed"] if r.get("branch_kept")), None)
+    if kept_branch:
+        return {"branch_kept": {"branch": kept_branch}}
+    return {"removed": True} if result["removed"] else {}
 
 
 def _tree(spec, rec, meta):
@@ -336,14 +361,18 @@ def scheduled_finish(spec, env, write):
     trigger = {"kind": rec.get("trigger") or (trigger_of(ctx, env.get("CLAUDE_SCHEDULE_SOURCE") or "") if ctx else "manual"), "attempt": ctx.get("attempt")}
     if rec.get("retry_of"):
         earlier = find_by_origin_job(registry, rec["retry_of"])
-        trigger["retry_of_url"] = (reap(earlier[-1]).get("origin") or {}).get("url") if earlier else None
+        trigger["retry_of_url"] = ((reap(earlier[-1]).get("origin") or {}).get("url") if earlier else None) or (read_job(registry, name, rec["retry_of"]) or {}).get("url")
     base.update({"trigger": trigger, "slot": rec.get("slot")})
     local = str(Path(schedule_dir(registry, name)) / f"summary-{job}.md")
     outcome = rec.get("outcome") or {}
     if (env.get("CLAUDE_SCHEDULE_MODE") or "run") == "check" or outcome.get("kind") in ("check", "skipped", "refused"):
         if not outcome:
             outcome = {"kind": "check", "ok": False, "checks": [{"name": "check", "ok": False, "detail": "the Run step recorded no result; read its log"}]}
-        text = _render_kept(None, {**base, "at": rec.get("at") or clock(), "outcome": outcome, "prompt": None if outcome["kind"] == "check" else base["prompt"]}, [], local)
+        warnings = []
+        if outcome["kind"] == "refused":
+            # A worktree group claimed before the start was refused holds nothing; it is released, as after any run (K10).
+            _clean_group(rec.get("group"), job, registry, project, warnings)
+        text = _render_kept(None, {**base, "at": rec.get("at") or clock(), "outcome": outcome, "prompt": None if outcome["kind"] == "check" else base["prompt"]}, warnings, local)
         if outcome["kind"] == "refused" or (outcome["kind"] == "check" and not outcome.get("ok")):
             step.command(annotation("error", f"{name} failed", outcome.get("error") or "the check failed"))
         return _post(step, name, ctx, text)
@@ -384,19 +413,8 @@ def scheduled_finish(spec, env, write):
             changes = _changes(spec, rec, meta, (snap or {}).get("header", {}).get("files_edited") or [])
         except OSError as e:
             warnings.append(f"What changed could not be read: {e}")
-    group = rec.get("group")
-    if group and changes is not None:
-        # K10: only a group this job created is cleaned; a name some other batch holds is left alone.
-        try:
-            if (group_view(registry, group).get("origin") or {}).get("job") == job:
-                result = clean(name=group, cwd=project, runs_dir=registry)
-                if result["kept"]:
-                    k = result["kept"][0]
-                    changes["kept"] = {"path": k["path"], "branch": k["branch"], "clean": invocation("clean", "--group", group, "--project", project)}
-                else:
-                    changes["removed"] = True
-        except Refusal as e:
-            warnings.append(f"The worktree was not cleaned up ({e.message}); `{invocation('clean', '--group', group, '--project', project)}` does it.")
+    if changes is not None:
+        changes.update(_clean_group(rec.get("group"), job, registry, project, warnings))
     if unconfirmed:
         warnings.insert(0, f"**The worker could not be confirmed stopped:** {unconfirmed}. Check this Mac, and `{invocation('stop', '--run', run_id, '--project', project)}`.")
     rel = os.path.relpath(run_dir, project)

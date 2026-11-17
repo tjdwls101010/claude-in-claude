@@ -220,6 +220,13 @@ class Slots(Job):
         self.assertEqual(len(self.worker_calls()), 2)
         self.assertIn("skipped", run.stdout)
 
+    def test_the_retry_of_a_refused_start_says_so(self):
+        env = self.job_env(run_id="1", source="dispatcher", extra={"FAKE_CLAUDE_VERSION": "1.0.0"})
+        run, finish, summary = self.job(env)
+        self.assertEqual(run.returncode, 1)
+        run, summary = self.auto("2", source="", event="schedule")
+        self.assertIn("retry of [the run that failed](https://github.com/someone/project/actions/runs/1)", summary)
+
     def test_a_failed_write_slot_is_not_retried(self):
         self.profile = "write"
         self.auto("1", prompt="x [[fake:auth_fail]]")
@@ -334,6 +341,28 @@ class Trees(Job):
         self.assertIn("clean --group nightly-44006368956-1", changes)
         self.assertTrue((self.project / ".claude" / "worktrees" / "nightly-44006368956-1-1" / "notes.md").exists())
         self.assertFalse((self.project / "notes.md").exists(), "the checkout is not touched")
+
+    def test_a_refused_worktree_start_releases_its_group(self):
+        run, finish, summary = self.job(self.job_env(prompt="x", extra={"FAKE_CLAUDE_VERSION": "1.0.0"}), worktree=True)
+        self.assertEqual((run.returncode, finish.returncode), (1, 0))
+        self.assertEqual(self.cli_json("status")["groups"], [])
+
+    def test_committed_work_in_a_worktree_is_shown_with_its_branch(self):
+        run, finish, summary = self.job(self.job_env(prompt="x [[fake:write:notes.md]] [[fake:commit:work]]"), worktree=True)
+        changes = summary.split("<b>Changes</b>", 1)[1].split("</details>", 1)[0]
+        self.assertIn("notes.md", changes)
+        self.assertIn("committed", changes)
+        self.assertIn("worktree-nightly-44006368956-1-1", changes, "the branch that keeps the commits is named")
+        self.assertNotIn("Nothing changed", changes)
+
+    def test_committed_work_in_the_checkout_is_listed(self):
+        run, finish, summary = self.job(self.job_env(prompt="x [[fake:write:new.txt]] [[fake:commit:work]]"))
+        changes = summary.split("<b>Changes</b>", 1)
+        head, body = changes[1].split("</summary>", 1)
+        self.assertIn("1 file changed during the run", head)
+        self.assertIn("committed", head)
+        self.assertIn("new.txt", body.split("</details>", 1)[0])
+        self.assertIn("HEAD moved", body)
 
     def test_a_group_name_held_by_another_batch_is_refused_and_left_alone(self):
         self.cli_json("batch", "--group", "nightly-44006368956-1", "--task", "x", "--profile", "read-only")

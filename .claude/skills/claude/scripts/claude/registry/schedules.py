@@ -93,6 +93,15 @@ def _completed_or_live(registry, name, state, job):
     return meta.get("state") not in NOT_COMPLETED
 
 
+def _profile_of(registry, name, state, job):
+    """The profile job `job` ran under: a slot is retried only when the job that failed it was read-only, whatever the schedule says now."""
+    rec = state["jobs"].get(job) or {}
+    if rec.get("profile"):
+        return rec["profile"]
+    meta = _job_run(registry, name, job)
+    return ((meta or {}).get("settings") or {}).get("profile")
+
+
 def _previous(registry, name, state, job):
     meta = _job_run(registry, name, job) if job else None
     rec = state["jobs"].get(job) or {}
@@ -100,7 +109,7 @@ def _previous(registry, name, state, job):
 
 
 def claim_slot(registry, name, slot, job, entry):
-    """Decide, under the schedule's lock, what an automatic trigger for `slot` does (K4), and record job `job` with `entry` (K19 ①). Returns `decision` — `first` (the slot was free and is now this job's), `retry` (the read-only job that filled it did not complete and has not been retried: this job is its one retry) or `skip` (it is filled, or a later slot already ran) — and `previous`, the job that filled it with its run id, state and run URL. `entry` must carry `profile`; a skipped job is recorded with outcome `skipped`."""
+    """Decide, under the schedule's lock, what an automatic trigger for `slot` does (K4), and record job `job` with `entry` (K19 ①). Returns `decision` — `first` (the slot was free and is now this job's), `retry` (the read-only job that filled it did not complete and has not been retried, and this job is read-only too: it is that slot's one retry) or `skip` (it is filled, or a later slot already ran) — and `previous`, the job that filled it with its run id, state and run URL. `entry` must carry `profile`; a skipped job is recorded with outcome `skipped`."""
     with _lock(registry, name):
         state = _load(registry, name)
         claim = state["slots"].get(str(slot))
@@ -109,7 +118,7 @@ def claim_slot(registry, name, slot, job, entry):
             state["last_slot"] = slot
             state["slots"][str(slot)] = {"job": job, "retried": None}
             decision, previous = "first", None
-        elif claim and claim.get("job") and slot == state["last_slot"] and not claim.get("retried") and entry.get("profile") == "read-only" and not _completed_or_live(registry, name, state, claim["job"]):
+        elif claim and claim.get("job") and slot == state["last_slot"] and not claim.get("retried") and entry.get("profile") == "read-only" and _profile_of(registry, name, state, claim["job"]) == "read-only" and not _completed_or_live(registry, name, state, claim["job"]):
             claim["retried"] = job
             rec["retry_of"] = claim["job"]
             decision, previous = "retry", _previous(registry, name, state, claim["job"])

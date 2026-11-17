@@ -138,6 +138,24 @@ class Rendered(unittest.TestCase):
         text = schedule.render_summary(None, self.context(outcome={"kind": "skipped", "reason": "this slot already ran", "previous": {}}, at=STARTED))
         self.assertIn("| **Trigger** | dispatcher · slot 2026-11-17 11:54 KST · at 11:54:43 |", text)
 
+    def test_a_huge_intermediate_message_keeps_the_summary_whole(self):
+        snap = self.run_dir()
+        snap["rows"].insert(3, {"kind": "msg", "index": 20, "time": None, "text": "y" * 1_000_000})
+        text = schedule.render_summary(snap, self.context())
+        self.assertLess(len(text.encode()), 900_000)
+        self.assertEqual(text.count("<details"), text.count("</details>"))
+        self.assertIn("<b>Continue on your Mac</b>", text)
+
+    def test_table_cells_and_lists_escape_what_they_must(self):
+        snap = self.run_dir()
+        snap["rows"] += [{"kind": "task", "index": 90, "time": None, "status": "started", "description": "split a | b"}, {"kind": "retry", "index": 91, "time": None, "attempt": 1, "max_retries": 3, "error": "x | y", "error_status": 529}]
+        snap["header"]["permission_denials"] = [{"tool": "Bash", "input": '{"command": "cat a | grep b"}'}]
+        text = schedule.render_summary(snap, self.context())
+        for line in text.splitlines():
+            if line.startswith("| ") and ("task" in line or "retry" in line) and "Step" not in line:
+                self.assertEqual(line.replace("\\|", "").count("|"), 6, line)
+        self.assertIn("> - `Bash` `cat a | grep b`", text)
+
     def test_limits_cut_the_answer_and_the_prompt(self):
         big = "x" * 500_000
         text = schedule.render_summary(self.run_dir(), self.context(prompt=big))

@@ -88,6 +88,12 @@ class Claims(unittest.TestCase):
         registry.update_job(self.reg, "nightly", "1-1", {"outcome": {"kind": "refused", "error": "no commit"}})
         self.assertEqual(self.claim(S3, "2-1", profile="write")["decision"], "skip")
 
+    def test_the_retry_follows_the_profile_of_the_job_that_failed(self):
+        # The schedule went from write to read-only between the two triggers: the writer's half-done slot is not tried again.
+        self.claim(S3, "1-1", profile="write")
+        registry.update_job(self.reg, "nightly", "1-1", {"outcome": {"kind": "refused", "error": "below the version floor"}})
+        self.assertEqual(self.claim(S3, "2-1", profile="read-only")["decision"], "skip")
+
     def test_a_lost_state_file_is_rebuilt_from_the_runs(self):
         self.claim(S3, "1-1")
         self.run_for("1-1", S3, "failed")
