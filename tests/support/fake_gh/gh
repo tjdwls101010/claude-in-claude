@@ -88,9 +88,54 @@ if args[:2] == ["auth", "status"]:
     print(json.dumps(f))
     sys.exit(0)
 
-if args[:1] == ["workflow"]:
-    print("fake gh: the skill does not call `gh workflow`; the dispatcher plist does", file=sys.stderr)
-    sys.exit(64)
+def option(name):
+    return args[args.index(name) + 1] if name in args and args.index(name) + 1 < len(args) else None
+
+
+if args[:2] == ["workflow", "run"]:
+    # What a dispatcher or an orchestrator's check run calls; answered as gh 2.103 did on the probe repository: the new run's URL, or the refusal for a disabled or missing workflow.
+    file, repo_name = args[2], option("--repo")
+    canonical = next((k for k in world["repos"] if k.lower() == (repo_name or "").lower()), None)
+    states = (world["repos"].get(canonical) or {}).get("workflows", {})
+    if file not in states:
+        f = fixture("dispatch-404")
+        sys.stderr.write(f["stderr"].replace("claude-none.yml", file))
+        sys.exit(1)
+    if states[file] != "active":
+        print(f"could not create workflow dispatch event: HTTP 422: Cannot trigger a 'workflow_dispatch' on a disabled workflow (https://api.github.com/repos/{canonical}/actions/workflows/1/dispatches)", file=sys.stderr)
+        sys.exit(1)
+    runs = world.setdefault("runs", [])
+    run_id = 44000000000 + len(runs) + 1
+    fields = dict(args[i + 1].split("=", 1) for i, a in enumerate(args) if a == "-f" and i + 1 < len(args))
+    runs.append({"databaseId": run_id, "workflowName": file, "displayTitle": f"{file[len('claude-'):-len('.yml')]} · {fields.get('mode') == 'check' and 'check' or fields.get('source') or 'workflow_dispatch'}", "event": "workflow_dispatch", "status": "completed", "conclusion": "success", "createdAt": "2026-11-17T06:00:00Z", "url": f"https://github.com/{canonical}/actions/runs/{run_id}"})
+    save()
+    print(f"https://github.com/{canonical}/actions/runs/{run_id}")
+    sys.exit(0)
+
+if args[:2] in (["run", "list"], ["run", "view"], ["run", "watch"]):
+    # Every run the fake started finished green; what an orchestrator reads after a check run.
+    runs = world.get("runs", [])
+    if args[1] == "list":
+        if option("--workflow"):
+            runs = [r for r in runs if r["workflowName"] == option("--workflow")]
+        if "--json" in args:
+            print(json.dumps(runs))
+        else:
+            for r in runs:
+                print(f"completed\tsuccess\t{r['displayTitle']}\t{r['workflowName']}\tmain\t{r['event']}\t{r['databaseId']}\t15s\t{r['createdAt']}")
+        sys.exit(0)
+    run = next((r for r in runs if str(r["databaseId"]) == (args[2] if len(args) > 2 else "")), None)
+    if run is None:
+        print(f"could not find any workflow run with ID {args[2] if len(args) > 2 else ''}", file=sys.stderr)
+        sys.exit(1)
+    if args[1] == "watch":
+        print(f"✓ Run {run['displayTitle']} ({run['databaseId']}) completed with 'success'")
+        sys.exit(0)
+    if "--json" in args:
+        print(json.dumps(run))
+    else:
+        print(f"✓ main {run['displayTitle']} · {run['databaseId']}\nTriggered via workflow_dispatch\n\nJOBS\n✓ run in 15s (ID 1)\n\nFor more information about the job, try: gh run view --job=1\nView this run on GitHub: {run['url']}")
+    sys.exit(0)
 
 if args[:1] != ["api"]:
     print(f"fake gh: unsupported {args[:2]}", file=sys.stderr)

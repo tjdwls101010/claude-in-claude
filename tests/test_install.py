@@ -11,7 +11,7 @@ import unittest
 from support.harness import ENTRY, SKILL_DIR, Sandbox
 
 SKILL_MD = SKILL_DIR / "SKILL.md"
-COMMANDS = ("start", "resume", "send", "batch", "status", "log", "result", "stop", "clean", "doctor")
+COMMANDS = ("start", "resume", "send", "batch", "status", "log", "result", "stop", "clean", "schedule", "unschedule", "doctor")
 
 
 def frontmatter():
@@ -40,6 +40,10 @@ class Frontmatter(unittest.TestCase):
         self.assertNotIn("codex", fm["description"].lower())
         self.assertEqual(fm["allowed-tools"], 'Bash(uv run "${CLAUDE_SKILL_DIR}/scripts/cli.py" *)')
 
+    def test_the_skill_folder_holds_no_references(self):
+        # What a runner needs to be told lives in the replies (runner.problems) and --help, not in a reference file (plan K29).
+        self.assertFalse((SKILL_DIR / "references").exists())
+
     def test_body_names_no_other_delegation_tool(self):
         _, text = frontmatter()
         self.assertNotIn("codex", text.lower())
@@ -60,10 +64,10 @@ class NamedThingsExist(unittest.TestCase):
             word = code.split()[0]
             if word in COMMANDS:
                 self.assertTrue(f"\n    {word} " in help_text, f"SKILL.md names command {word}")
-        fields = ("next.command", "profile_exceptions", "permission_denials", "files_edited", "attention", "quota", "mode_mismatch", "stderr_tail", "session_id")
+        fields = ("next.command", "profile_exceptions", "permission_denials", "files_edited", "attention", "quota", "mode_mismatch", "stderr_tail", "session_id", "runner.problems", "schedule.runners.problems")
         for field in fields:
             if f"`{field}`" in body or f"`{field}`" in body.replace("next.command", "next"):
-                self.assertTrue(field.split(".")[0] in help_text, f"SKILL.md names reply field {field}")
+                self.assertTrue(all(part in help_text for part in field.split(".")), f"SKILL.md names reply field {field}")
 
 
 class Invocation(Sandbox):

@@ -1,8 +1,10 @@
-"""S6: the skill used by a headless orchestrator, draft SKILL.md against a control, on the five scenarios in scenarios.md.
+"""S6: the skill used by a headless orchestrator, draft SKILL.md against a control, on the scenarios in scenarios.md.
 
 Run from the repository root (real claude, real subscription):
     python3 tests/e2e/run_e2e.py --out .tmp/e2e            # every scenario, both variants
     python3 tests/e2e/run_e2e.py --scenario 3 --variant draft --out .tmp/e2e
+
+Scheduling scenarios (6-9) put the fake `gh` and `launchctl` from tests/support first on PATH, so nothing reaches GitHub or launchd; their project's remote is the fake's `someone/project`. The orchestrator must run with the real HOME (its login), so `schedule` writes its dispatcher plist to the real ~/Library/LaunchAgents — never loaded, since launchctl is the fake — and a scenario with a ready runner puts an inert runner-service plist there; both are removed by their exact `someone-project` names after each session, also when it fails.
 
 Each session gets a fresh project under --out, an orchestrator `claude -p --model sonnet --setting-sources project,local` (so neither the user's live copy of this skill nor their global CLAUDE.md is in it), and a temporary plugin holding only this skill in the variant under test. Workers are started by the skill's CLI and so run with the user's whole environment. Prints one JSON summary line per session and writes the orchestrator's events next to it.
 """
@@ -12,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -20,6 +23,11 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+SUPPORT = HERE.parent / "support"
+AGENTS = Path.home() / "Library" / "LaunchAgents"
+LOGS = Path.home() / "Library" / "Logs" / "claude-schedule"
+FAKE_REPO = "someone/project"
+RUNNER_PLIST = AGENTS / "actions.runner.someone-project.mac.plist"
 REPO = HERE.parents[1]
 SKILL = REPO / ".claude" / "skills" / "claude"
 PARENT_IDENTITY = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_SKILL_RUN", "CLAUDE_SKILL_TEST_TIMINGS")
@@ -64,6 +72,62 @@ SCENARIOS = {
         "read_only": True,
     },
 }
+
+
+SCHEDULING = {
+    6: {
+        "name": "schedule-review",
+        "files": {"README.md": "# project\n", "app.py": "def main():\n    return 1\n"},
+        "prompt": "매일 새벽 3시에 이 저장소의 어제 커밋을 리뷰해서 알려 주도록 클로드 작업자를 예약해 줘.",
+        "runner": "ready",
+        "expect_profile": "read-only",
+    },
+    7: {
+        "name": "schedule-docs",
+        "files": {"README.md": "# project\n", "docs/a.md": "# A\n", "docs/b.md": "# B\n"},
+        "prompt": "docs/ 아래 문서 색인(docs/INDEX.md)을 매주 월요일 9시에 다시 만들도록 클로드 작업자를 예약해 줘. 파일을 바꾸는 일이야.",
+        "runner": "ready",
+        "expect_profile": "write",
+    },
+    8: {
+        "name": "schedule-once",
+        "files": {"calc.py": "def add(a, b):\n    return a + b\n", "test_calc.py": "import unittest\nfrom calc import add\n\n\nclass T(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(add(2, 3), 5)\n"},
+        "prompt": "내일 오후 3시에 한 번, 이 프로젝트의 테스트를 돌려서 결과를 알려 주도록 클로드 작업자를 예약해 줘.",
+        "runner": "ready",
+        "expect_profile": "read-only",
+    },
+    9: {
+        "name": "schedule-no-runner",
+        "files": {"README.md": "# project\n", "app.py": "def main():\n    return 1\n"},
+        "prompt": "매일 새벽 3시에 이 저장소의 어제 커밋을 리뷰해서 알려 주도록 클로드 작업자를 예약해 줘.",
+        "runner": "none",
+        "expect_profile": "read-only",
+    },
+}
+SCENARIOS.update({n: {**sc, "schedule": True} for n, sc in SCHEDULING.items()})
+
+
+def schedule_env(root, env, runner):
+    """The fakes first on PATH and a simulated private repository; an inert runner-service plist when the runner is ready."""
+    state = root / "fake-gh"
+    state.mkdir()
+    runners = [{"name": "mac", "status": "online"}] if runner == "ready" else []
+    (state / "world.json").write_text(json.dumps({"auth": "ok", "repos": {FAKE_REPO: {"private": True, "default_branch": "main", "files": {}, "workflows": {}, "runners": runners}}}))
+    env.update({"PATH": os.pathsep.join([str(SUPPORT / "fake_gh"), str(SUPPORT / "fake_launchctl"), env.get("PATH", "")]), "FAKE_GH_STATE": str(state), "FAKE_GH_FIXTURES": str(SUPPORT / "fixtures" / "github"), "FAKE_LAUNCHCTL_STATE": str(root / "fake-launchctl")})
+    if runner == "ready":
+        rdir = root / "runner"
+        rdir.mkdir()
+        tools = [os.path.dirname(shutil.which(t) or "") for t in ("uv", "claude", "gh")]
+        (rdir / ".path").write_text(":".join(dict.fromkeys(t for t in tools if t)) + ":/usr/bin:/bin")
+        AGENTS.mkdir(parents=True, exist_ok=True)
+        RUNNER_PLIST.write_bytes(plistlib.dumps({"Label": RUNNER_PLIST.stem, "WorkingDirectory": str(rdir), "ProgramArguments": ["/usr/bin/true"]}))
+    return state
+
+
+def schedule_cleanup():
+    """Remove what a scheduling session can leave under the real HOME, by the fake repository's exact names."""
+    for p in list(AGENTS.glob("claude-schedule.someone-project.*.plist")) + [RUNNER_PLIST] + (list(LOGS.glob("someone-project.*.log")) if LOGS.is_dir() else []):
+        p.unlink(missing_ok=True)
 
 
 def control_text(full):
@@ -142,19 +206,29 @@ def run_session(out, number, variant, timeout):
     outside = root / "outside"
     outside.mkdir(parents=True)
     make_project(project, sc["files"])
+    if sc.get("schedule"):
+        git(project, "remote", "add", "origin", f"https://github.com/{FAKE_REPO}.git")
     plugin = build_plugin(out, variant)
     cli = plugin / "skills" / "claude" / "scripts" / "cli.py"
     prompt = sc["prompt"].format(outside=outside)
     before = snapshot(project)
     env = {k: v for k, v in os.environ.items() if k not in PARENT_IDENTITY}
+    allowed = ["Skill(headless-workers:claude)", f'Bash(uv run "{cli}" *)']
+    state = None
+    if sc.get("schedule"):
+        state = schedule_env(root, env, sc["runner"])
+        allowed += ["Bash(gh workflow run *)", "Bash(gh run *)"]
     argv = ["claude", "-p", "--model", "sonnet", "--setting-sources", "project,local", "--plugin-dir", str(plugin), "--output-format", "stream-json", "--verbose",
-            "--permission-mode", "default", "--permission-prompts", "none", "--allowedTools", "Skill(headless-workers:claude)", f'Bash(uv run "{cli}" *)', "--", prompt]
+            "--permission-mode", "default", "--permission-prompts", "none", "--allowedTools", *allowed, "--", prompt]
     started = time.time()
     try:
         proc = subprocess.run(argv, cwd=project, capture_output=True, text=True, env=env, timeout=timeout)
         stdout, code = proc.stdout, proc.returncode
     except subprocess.TimeoutExpired as e:
         stdout, code = (e.stdout or b"").decode() if isinstance(e.stdout, bytes) else (e.stdout or ""), "timeout"
+    finally:
+        if sc.get("schedule"):
+            schedule_cleanup()
     (root / "orchestrator.jsonl").write_text(stdout)
     events = []
     for line in stdout.splitlines():
@@ -192,6 +266,30 @@ def run_session(out, number, variant, timeout):
         summary["files_after"] = {f: (project / f).exists() for f in sc["files_after"]}
     if sc.get("absent"):
         summary["absent_ok"] = all(not Path(p.format(outside=outside)).exists() for p in sc["absent"])
+    if sc.get("schedule"):
+        world = json.loads((state / "world.json").read_text())
+        repo = world["repos"][FAKE_REPO]
+        bash = [b["input"].get("command", "") for e in events if e.get("type") == "assistant" for b in e["message"].get("content") or [] if b.get("type") == "tool_use" and b.get("name") == "Bash"]
+        scheds = [c for c in commands if re.search(r'cli\.py" schedule ', c) and "--help" not in c]
+        committed = {path: f["text"] for path, f in repo.get("files", {}).items()}
+        spec = None
+        for text in committed.values():
+            line = next((l for l in text.splitlines() if l.startswith("# spec: ")), None)
+            spec = json.loads(line[len("# spec: "):]) if line else spec
+        summary.update({
+            "schedule_calls": [re.sub(r'^uv run "[^"]+" ', "", c)[:300] for c in scheds],
+            "dry_run_first": bool(scheds) and "--dry-run" in scheds[0],
+            "committed": bool(committed),
+            "committed_profile": (spec or {}).get("profile"),
+            "profile_ok": (spec or {}).get("profile") == sc["expect_profile"] if spec else None,
+            "committed_prompt": (spec or {}).get("prompt"),
+            "committed_time": (spec or {}).get("cron") or (spec or {}).get("at"),
+            "ran_check": any("gh workflow run" in c and "mode=check" in c for c in bash),
+            "asked": any(b.get("name") == "AskUserQuestion" for e in events if e.get("type") == "assistant" for b in e["message"].get("content") or [] if b.get("type") == "tool_use") or answer.rstrip().endswith("?"),
+            "named_effects": bool(re.search(r"(?i)(default branch|commit|LaunchAgent|workflow|기본 브랜치|커밋|워크플로)", answer)),
+            "named_runner_problem": bool(re.search(r"(?i)(runner|러너)", answer)),
+            "other_bash": [c[:200] for c in bash if "cli.py" not in c],
+        })
     if sc.get("read_only"):
         summary["used_read_only"] = any("--profile read-only" in c for c in commands)
         summary["tree_changed"] = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
@@ -202,7 +300,7 @@ def run_session(out, number, variant, timeout):
 def main():
     ap = argparse.ArgumentParser(description="S6 headless e2e: draft SKILL.md against a control.")
     ap.add_argument("--out", required=True, help="where projects, plugins and events go")
-    ap.add_argument("--scenario", default="all", help="1-5 or all")
+    ap.add_argument("--scenario", default="all", help="1-9, or all (1-5 run workers; 6-9 schedule through the fake gh and launchctl)")
     ap.add_argument("--variant", choices=("draft", "control", "both"), default="both")
     ap.add_argument("--timeout", type=int, default=900, help="seconds per session")
     args = ap.parse_args()
