@@ -147,6 +147,9 @@ def schedule(*, name, flags, cwd, dry_run=False, public_ok=False, message=None):
         if current is None or current["text"] != text:
             for attempt in (1, 2):
                 message_text = message or (f"Schedule Claude worker {name}: " + (f"once at {spec['at']} ({timezone})" if spec.get("at") else f"{spec['cron']} ({timezone})"))
+                if spec.get("at") and not fire_times(spec, clock(), 1):
+                    # A one-off's time can pass while GitHub answers; checked once more right before the write.
+                    raise Refusal(f"the one-off time {spec['at']} passed while scheduling; nothing was committed", instead="schedule again with a later --at")
                 try:
                     done = write_workflow(repo, file, text, message_text, branch, sha=(current or {}).get("sha"))
                     status, commit, url = "committed", done["commit"], done["url"]
@@ -154,7 +157,7 @@ def schedule(*, name, flags, cwd, dry_run=False, public_ok=False, message=None):
                 except GitHubError as e:
                     if not e.conflict or attempt == 2:
                         if e.status is None:
-                            raise Refusal(f"the commit to {branch} failed: {e.message}", instead="nothing was written; run the same command again once gh reaches GitHub")
+                            raise Refusal(f"the commit to {branch} got no answer from GitHub: {e.message}", instead="whether GitHub committed it is unknown; run the same command again once gh reaches GitHub — it finds the workflow committed or not, and installs the dispatcher")
                         raise Refusal(f"GitHub refused the commit to {branch} (HTTP {e.status}): {e.message}", instead="`schedule … --dry-run` prints the workflow file; commit it through a pull request, then call `schedule` again to install the dispatcher")
                     # Another call committed first: merge onto what it committed and try once more (K12).
                     current, recorded = _existing(repo, file, branch)

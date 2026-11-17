@@ -332,6 +332,7 @@ class Refusals(Scheduling):
         reply = self.new(expect=1)
         self.assertIn("error connecting", reply["error"])
         self.assertNotIn("pull request", reply.get("instead") or "")
+        self.assertNotIn("nothing was written", reply.get("instead") or "", "a request that got no answer may still have been committed")
 
     def test_inside_a_worker(self):
         reply = self.cli_json("schedule", "--name", "nightly", "x", "--cron", "0 3 * * *", "--profile", "read-only", expect=1, env={"CLAUDE_SKILL_RUN": "r1"})
