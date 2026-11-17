@@ -149,6 +149,13 @@ class ScheduleReadiness(Sandbox):
         self.assertEqual([p["problem"] for p in s["runners"]["problems"]], ["session_create"])
         self.assertEqual(s["runners"]["local"][0]["path_has"], {"uv": True, "claude": True, "gh": False})
 
+    def test_a_runner_env_that_is_not_utf8(self):
+        self.runner(session_create=True)
+        (self.root / "actions-runner" / ".env").write_bytes(b"LANG=\xff\xfe\nCLAUDE_CODE_OAUTH_TOKEN=x\n")
+        d, s = self.schedule()
+        self.assertEqual(s["runners"]["problems"], [], "the token line is still read")
+        self.assertFalse(any("did not answer" in w for w in d["warnings"]))
+
     def test_a_ready_runner(self):
         self.runner(session_create=False)
         d, s = self.schedule()

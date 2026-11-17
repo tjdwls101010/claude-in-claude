@@ -18,7 +18,7 @@ def _agents():
 def _read_env(path):
     out = {}
     try:
-        for line in Path(path).read_text(encoding="utf-8").splitlines():
+        for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
             key, sep, value = line.partition("=")
             if sep and key.strip():
                 out[key.strip()] = value
@@ -40,7 +40,7 @@ def local_runners(repo):
             data = {}
         rdir = data.get("WorkingDirectory")
         try:
-            path = Path(rdir, ".path").read_text(encoding="utf-8").strip() if rdir else ""
+            path = Path(rdir, ".path").read_text(encoding="utf-8", errors="replace").strip() if rdir else ""
         except OSError:
             path = ""
         out.append({

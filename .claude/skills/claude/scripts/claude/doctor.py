@@ -106,6 +106,8 @@ def schedule_readiness_within(cwd, seconds):
             box["result"] = schedule_readiness(cwd)
         except GitHubError as e:
             box["result"] = ({"platform_ok": launchd_supported(), "gh": {"error": e.message}, "repo": None, "runners": None}, [f"schedules need gh, which failed: {e.message}"])
+        except Exception as e:  # a check that is only advice must not break doctor or pass for a timeout
+            box["result"] = ({"platform_ok": launchd_supported(), "gh": None, "repo": None, "runners": None, "error": f"{type(e).__name__}: {e}"}, [f"whether this project can be scheduled could not be checked: {type(e).__name__}: {e}"])
 
     t = threading.Thread(target=work, daemon=True)
     t.start()
