@@ -104,7 +104,7 @@ uv run "$CLI" schedule --list
 uv run "$CLI" unschedule --name nightly-review
 ```
 
-Times are in this Mac's time zone. Each run's page on GitHub shows a summary: the outcome, the trigger and the tree the worker saw, alerts (failures, denied tool calls), the prompt, the worker's answer, what changed, every tool call, and the commands to continue the session on your Mac; the run is also in `.claude-runs/` like any other, so `status`, `log`, `result` and `resume` work on it. `--at YYYY-MM-DDTHH:MM` runs once and then turns its workflow off. `--worktree` gives each writing run its own checkout of your local HEAD. Pausing is disabling the workflow (`gh workflow disable`); re-running and cancelling are GitHub's too.
+Times are in this Mac's time zone. Each run's page on GitHub shows a summary: the outcome, the trigger and the tree the worker saw, alerts (failures, denied tool calls), the prompt, the worker's answer, what changed, its activity (trimmed when long), and the commands to continue the session on your Mac; the run is also in `.claude-runs/` like any other, so `status`, `log`, `result` and `resume` work on it. `--at YYYY-MM-DDTHH:MM` runs once and then turns its workflow off. `--worktree` gives each writing run its own checkout of your local HEAD. Pausing is disabling the workflow (`gh workflow disable`); re-running and cancelling are GitHub's too.
 
 ## 6. Project Status
 
