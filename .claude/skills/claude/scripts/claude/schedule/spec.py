@@ -12,13 +12,14 @@ from claude.github import unsafe_text
 from claude.launchd import calendar_entries
 from claude.runs import DEFAULTS
 
-from .times import CronError, parse_cron
+from .times import CronError, fire_times, parse_cron
 
 # The worktree group <name>-<run id>-<attempt> must fit a group name's 40 characters with an 11-digit run id and a spare digit (K10).
 NAME_RULE = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
 LABEL_RULE = re.compile(r"^[A-Za-z0-9._-]+$")
 SCHEDULE_DEFAULTS = {"model": DEFAULTS["model"], "effort": DEFAULTS["effort"], "timeout": 3600, "worktree": False, "runs_on": ["self-hosted"]}
 AT_FORMAT = "%Y-%m-%dT%H:%M"
+AT_RULE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$")
 
 
 def bad(message):
@@ -77,16 +78,22 @@ def merge(flags, recorded, *, timezone, project, cli, now, keep_definition=False
         spec["runs_on"] = ["self-hosted", *spec["runs_on"]]
     if spec["at"]:
         try:
+            if not AT_RULE.match(spec["at"]):
+                raise ValueError
             when = datetime.strptime(spec["at"], AT_FORMAT).replace(tzinfo=ZoneInfo(timezone))
         except ValueError:
-            raise bad(f"--at {spec['at']!r}: give a local time as YYYY-MM-DDTHH:MM")
-        if flags.get("at") and when.timestamp() <= now:
-            raise bad(f"--at {spec['at']} is not in the future ({timezone})")
+            raise bad(f"--at {spec['at']!r}: give a local time as YYYY-MM-DDTHH:MM, zero-padded")
+        if when.timestamp() <= now:
+            if flags.get("at"):
+                raise bad(f"--at {spec['at']} is not in the future ({timezone})")
+            raise bad(f"this one-off's time {spec['at']} has passed; give a new --at to run it again")
     else:
         try:
             parse_cron(spec["cron"])
         except CronError as e:
             raise bad(f"--cron: {e}")
+        if not fire_times({"cron": spec["cron"], "at": None, "timezone": timezone}, now, 1):
+            raise bad(f"--cron {spec['cron']!r} never fires")
     try:
         calendar_entries(fields_of(spec))
     except ValueError as e:

@@ -11,12 +11,15 @@ import sys
 import threading
 from pathlib import Path
 
-from support.harness import ENTRY, FIXTURES, SUPPORT, Sandbox, git
+from support.harness import ENTRY, FIXTURES, SUPPORT, Sandbox, engine, git
+
+registry = engine("claude.registry")
 
 REPO = "someone/project"
-NOW = 1794862020  # 2026-11-17 05:47 KST
+NOW = None  # set below from this Mac's zone
 TZ = os.path.realpath("/etc/localtime").split("/zoneinfo/", 1)[1]
 LABEL = "claude-schedule.someone-project.nightly"
+NOW = int(__import__("datetime").datetime(2026, 11, 17, 5, 47, tzinfo=__import__("zoneinfo").ZoneInfo(TZ)).timestamp())  # 05:47 on 2026-11-17 here
 
 
 class Scheduling(Sandbox):
@@ -57,6 +60,9 @@ class Scheduling(Sandbox):
     def lc_calls(self):
         return [json.loads(p.read_text())["argv"] for p in sorted((self.lc_state / "calls").glob("*.json"))] if (self.lc_state / "calls").exists() else []
 
+    def definition(self, name="nightly"):
+        return (registry.schedule_state(str(self.runs_dir()), name) or {}).get("definition")
+
     def plist(self, label=LABEL):
         p = self.home / "Library" / "LaunchAgents" / f"{label}.plist"
         return plistlib.loads(p.read_bytes()) if p.exists() else None
@@ -69,7 +75,14 @@ class Scheduling(Sandbox):
 
     def expected_workflow(self, definition, prompt="Review yesterday's commits and report what looks risky.", cron="0 3 * * *", profile="read-only"):
         spec = {"at": None, "cli": str(ENTRY), "cron": cron, "definition": definition, "effort": "high", "model": "sonnet", "name": "nightly", "profile": profile, "project": str(self.project), "prompt": prompt, "runs_on": ["self-hosted"], "schema": None, "timeout": 3600, "timezone": TZ, "worktree": False}
-        steps = f"--name nightly --project {self.project} --profile {profile} --model sonnet --effort high --timeout 3600 --cron '{cron}' --timezone {TZ} --workflow claude-nightly.yml --definition {definition}"
+        import shlex
+
+        steps = f"--name nightly --project {shlex.quote(str(self.project))} --profile {profile} --model sonnet --effort high --timeout 3600 --cron '{cron}' --timezone {TZ} --workflow claude-nightly.yml --definition {definition}"
+
+        def run(step):
+            # The step's command: shell words, written as a YAML double-quoted (JSON) string.
+            return json.dumps(f"uv run {shlex.quote(str(ENTRY))} __scheduled {step} {steps}", ensure_ascii=False)
+
         env = f"""          CLAUDE_SCHEDULE_MODE: ${{{{ inputs.mode }}}}
           CLAUDE_SCHEDULE_SOURCE: ${{{{ inputs.source }}}}
           CLAUDE_SCHEDULE_PROMPT: |2-
@@ -100,19 +113,19 @@ concurrency:
   queue: max
 jobs:
   run:
-    runs-on: [self-hosted]
+    runs-on: ["self-hosted"]
     timeout-minutes: 70
     steps:
       - name: Run
         env:
 {env}
-        run: uv run {ENTRY} __scheduled run {steps}
+        run: {run("run")}
       - name: Finish
         if: always()
         env:
 {env}
           GH_TOKEN: ${{{{ github.token }}}}
-        run: uv run {ENTRY} __scheduled finish {steps}
+        run: {run("finish")}
 """
 
 
@@ -138,7 +151,7 @@ class Schedule(Scheduling):
         self.assertEqual(reply["dispatcher"]["status"], "installed")
         self.assertEqual(reply["fires"]["next"][0], f"2026-11-18 03:00 {'KST' if TZ == 'Asia/Seoul' else reply['fires']['next'][0].split()[-1]}")
         self.assertEqual(reply["next"]["command"], f"gh workflow run claude-nightly.yml --repo {REPO} -f mode=check")
-        self.assertEqual(json.loads((self.runs_dir() / ".schedules" / "nightly" / "state.json").read_text())["definition"], definition)
+        self.assertEqual(self.definition(), definition)
 
     def test_calling_again_changes_only_what_is_given(self):
         self.new()
@@ -190,6 +203,7 @@ class Schedule(Scheduling):
         reply = self.new(expect=1)
         self.assertIn("Changes must be made through a pull request", reply["error"])
         self.assertIn("--dry-run", reply["instead"])
+        self.assertEqual(sum(1 for c in self.gh_calls() if "PUT" in c["argv"]), 1, "a protected branch is not a race to retry")
         self.assertIsNone(self.plist())
         self.assertEqual([c for c in self.lc_calls() if c[0] == "bootstrap"], [])
 
@@ -200,8 +214,53 @@ class Schedule(Scheduling):
         self.assertEqual(reply["workflow"]["status"], "committed", "the merged definition (now with --profile write) is committed on the second try")
         spec = json.loads(self.committed().splitlines()[1][len("# spec: "):])
         self.assertEqual(spec["profile"], "write")
-        self.assertEqual(json.loads((self.runs_dir() / ".schedules" / "nightly" / "state.json").read_text())["definition"], spec["definition"])
+        self.assertEqual(self.definition(), spec["definition"])
         self.assertEqual(sum(1 for c in self.gh_calls() if "PUT" in c["argv"] and "contents" in " ".join(c["argv"])), 3)
+
+    def test_after_a_race_the_dispatcher_fires_on_the_committed_time(self):
+        self.new()
+        self.world(race=1, race_cron="30 4 * * *")
+        reply = self.schedule("--profile", "write")
+        spec = json.loads(self.committed().splitlines()[1][len("# spec: "):])
+        self.assertEqual((spec["cron"], spec["profile"]), ("30 4 * * *", "write"))
+        self.assertEqual(self.plist()["StartCalendarInterval"], [{"Minute": 30, "Hour": 4}])
+        self.assertEqual(reply["fires"]["cron"], "30 4 * * *")
+        self.assertEqual(reply["settings"]["profile"], "write")
+
+    def test_awkward_paths_and_labels_reach_the_job_as_given(self):
+        import shlex
+
+        odd = self.root / "my proj #2: final"
+        odd.mkdir()
+        git(odd, "init", "-q", "-b", "main")
+        git(odd, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "init")
+        git(odd, "remote", "add", "origin", f"https://github.com/{REPO}.git")
+        self.cli_json("schedule", "--name", "nightly", "x", "--cron", "0 3 * * *", "--profile", "read-only", "--runs-on", "123", "--runs-on", "true", "--project", str(odd))
+        text = self.committed()
+        run = next(l for l in text.splitlines() if l.startswith("        run: ") and " run " in l)[len("        run: "):]
+        self.assertTrue(run.startswith('"'), "the run line is a quoted YAML string")
+        words = shlex.split(json.loads(run))
+        self.assertEqual(words[words.index("--project") + 1], str(odd))
+        self.assertIn('    runs-on: ["self-hosted", "123", "true"]', text)
+
+    def test_the_repository_is_named_as_github_spells_it(self):
+        git(self.project, "remote", "set-url", "origin", "https://github.com/Someone/Project.git")
+        reply = self.new()
+        self.assertEqual(reply["repo"], REPO)
+        self.assertEqual(reply["dispatcher"]["label"], LABEL)
+        self.assertIsNotNone(self.plist())
+
+    def test_many_workflows_are_all_listed(self):
+        self.new()
+        w = self.world()
+        for n in range(150):
+            w["repos"][REPO]["workflows"][f"build-{n:03d}.yml"] = "active"  # sorted before claude-nightly.yml, so it lands on page 2
+        self.world(w)
+        rows = self.cli_json("schedule", "--list")["schedules"]
+        self.assertEqual([r["name"] for r in rows], ["nightly"])
+        w["repos"][REPO]["workflows"]["zzz.yml"] = "active"
+        self.world(w)
+        self.assertEqual(self.cli_json("schedule", "--list")["orphans"], [])
 
     def test_runner_problems_come_from_this_mac(self):
         rdir = self.root / "actions-runner"
@@ -235,6 +294,8 @@ class Refusals(Scheduling):
             (("--name", "nightly", "x", "--at", "2026-11-17T05:00", "--profile", "read-only"), "not in the future"),
             (("--name", "nightly", "x", "--cron", "0 3 * * *", "--profile", "read-only", "--worktree"), "read-only"),
             (("--name", "nightly", "x\x07", "--cron", "0 3 * * *", "--profile", "read-only"), "control character"),
+            (("--name", "nightly", "x", "--at", "2027-1-5T9:00", "--profile", "read-only"), "YYYY-MM-DDTHH:MM"),
+            (("--name", "nightly", "x", "--cron", "0 3 30 2 *", "--profile", "read-only"), "never fires"),
         ]:
             with self.subTest(why=why):
                 reply = self.cli_json("schedule", *args, expect=2)
@@ -268,13 +329,21 @@ class Refusals(Scheduling):
 
 
 class Unschedule(Scheduling):
+    def test_a_file_this_skill_did_not_write_is_left_alone(self):
+        w = self.world()
+        w["repos"][REPO]["files"][".github/workflows/claude-code-review.yml"] = {"text": "name: review\non: pull_request\n", "sha": "abc"}
+        self.world(w)
+        reply = self.cli_json("unschedule", "--name", "code-review", expect=1)
+        self.assertIn("was not written by this skill", reply["error"])
+        self.assertIn(".github/workflows/claude-code-review.yml", self.repo()["files"])
+
     def test_removes_both_halves(self):
         self.new()
         reply = self.cli_json("unschedule", "--name", "nightly")
         self.assertEqual((reply["dispatcher"]["status"], reply["workflow"]["status"]), ("removed", "deleted"))
         self.assertIsNone(self.committed())
         self.assertIsNone(self.plist())
-        self.assertFalse((self.runs_dir() / ".schedules" / "nightly").exists())
+        self.assertIsNone(registry.schedule_state(str(self.runs_dir()), "nightly"))
         again = self.cli_json("unschedule", "--name", "nightly")
         self.assertEqual((again["dispatcher"]["status"], again["workflow"]["status"]), ("absent", "absent"))
 
@@ -292,8 +361,8 @@ class Unschedule(Scheduling):
         meta_path.write_text(json.dumps(meta))
         out = self.cli_json("unschedule", "--name", "nightly")
         self.assertIn(reply["run_id"], out["note"])
-        state = json.loads((self.runs_dir() / ".schedules" / "nightly" / "state.json").read_text())
-        self.assertIsNone(state["definition"])
+        self.assertIsNone(self.definition())
+        self.assertIsNotNone(registry.schedule_state(str(self.runs_dir()), "nightly"))
         self.cli_json("stop", "--run", reply["run_id"])
 
 
@@ -330,21 +399,18 @@ class Races(Scheduling):
         other = next(p for p in prompts if p != spec["prompt"])
         self.assertNotIn(other, self.committed(), "the committed workflow is one call's, whole")
         self.assertEqual(self.committed().count(spec["prompt"]), 3, "the spec line and both steps")
-        self.assertEqual(json.loads((self.runs_dir() / ".schedules" / "nightly" / "state.json").read_text())["definition"], spec["definition"])
+        self.assertEqual(self.definition(), spec["definition"])
         self.assertEqual(self.plist()["Label"], LABEL)
 
 
 AT = "2026-11-17T06:00"
-AFTER = 1794866460  # 2026-11-17 06:01 KST
+# 06:01 on that day in this Mac's zone, computed with the standard library, so the one-off tests run in any zone.
+AFTER = int(__import__("datetime").datetime(2026, 11, 17, 6, 1, tzinfo=__import__("zoneinfo").ZoneInfo(TZ)).timestamp())
 
 
 class OneOff(Scheduling):
     """K8: a one-off turns itself off when its time will not be tried again, and only the definition it was started from."""
 
-    def setUp(self):
-        super().setUp()
-        if TZ != "Asia/Seoul":
-            self.skipTest("the instants here are KST")
 
     def make(self, profile="read-only", prompt="x"):
         self.cli_json("schedule", "--name", "nightly", prompt, "--at", AT, "--profile", profile)
@@ -411,6 +477,12 @@ class OneOff(Scheduling):
         run, finish, summary = self.job(spec, "1", "x")
         self.assertEqual(self.wf_state(), "active", "nothing of a removed definition is disabled")
         self.assertIn("left the newer definition alone", summary)
+
+    def test_calling_again_after_the_time_needs_a_new_time(self):
+        spec = self.make()
+        self.job(spec, "1", "x")
+        reply = self.cli_json("schedule", "--name", "nightly", "--model", "opus", expect=2, env={"CLAUDE_SKILL_TEST_NOW": str(AFTER + 3600)})
+        self.assertIn("give a new --at", reply["error"])
 
     def test_a_failed_disable_names_the_command(self):
         spec = self.make()

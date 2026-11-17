@@ -54,20 +54,26 @@ def local_runners(repo):
     return out
 
 
-def runner_problems(registered, local, tools=("uv", "claude")):
-    """What keeps scheduled workers from running, as `[{problem, why, fixes}]` — `none`, `offline`, `not_local`, `session_create`, `path_missing` — from the runners GitHub lists for the repository (`registered`), the services on this Mac (`local`) and the `tools` jobs need on their PATH (gh too for a one-off, whose Finish step disables its workflow). Where there is more than one way to fix it, every way is given: which one is the Mac's owner's choice."""
+def runner_problems(registered, local, tools=("uv", "claude"), runs_on=("self-hosted",)):
+    """What keeps scheduled workers from running, as `[{problem, why, fixes}]` — `none`, `offline`, `not_local`, `session_create`, `path_missing` — from the runners GitHub lists for the repository (`registered`), the services on this Mac (`local`), the `tools` jobs need on their PATH (gh too for a one-off, whose Finish step disables its workflow) and the labels a job asks for (`runs_on`). Only this Mac's services of runners with every label count: the workflow names paths on this Mac. Where there is more than one way to fix it, every way is given: which one is the Mac's owner's choice."""
     problems = []
+    wanted = set(runs_on)
+    fitting = [r for r in registered if wanted <= set(r.get("labels") or [])]
+    if registered and not fitting:
+        problems.append({"problem": "none", "why": f"no runner of this repository has every label {', '.join(sorted(wanted))}: a scheduled job waits in GitHub's queue and fails after 24 hours", "fixes": ["Give this Mac's runner the missing labels (the repository's Settings → Actions → Runners), or schedule with --runs-on labels it has."]})
+        return problems
+    registered = fitting
     if not registered:
         problems.append({"problem": "none", "why": "no self-hosted runner is registered for this repository: a scheduled job waits in GitHub's queue and fails after 24 hours", "fixes": ["In the repository's Settings → Actions → Runners → New self-hosted runner (macOS), download and configure a runner on this Mac, then install it as a service from its directory with `./svc.sh install` and `./svc.sh start` (no sudo: it becomes a LaunchAgent of your login). On a personal account a runner serves one repository."]})
         return problems
-    if not any(r.get("status") == "online" for r in registered):
-        names = ", ".join(r["name"] for r in registered)
-        problems.append({"problem": "offline", "why": f"the repository's runner ({names}) is offline: jobs wait for it up to 24 hours, then fail", "fixes": ["Start its service from the runner's directory: `./svc.sh start`; if it was never installed as a service, `./svc.sh install` first."]})
-    names = {r["name"] for r in registered}
-    mine = [l for l in local if l["name"] in names]
+    status = {r["name"]: r.get("status") for r in registered}
+    mine = [l for l in local if l["name"] in status]
     if not mine:
         problems.append({"problem": "not_local", "why": "no service of this repository's runner is installed on this Mac: the workflow names paths on this Mac, so a job another machine picks up fails", "fixes": ["Install the runner as a service on this Mac (`./svc.sh install` in its directory), or remove runners on other machines from this repository."]})
         return problems
+    if not any(status[l["name"]] == "online" for l in mine):
+        names = ", ".join(l["name"] for l in mine)
+        problems.append({"problem": "offline", "why": f"this Mac's runner ({names}) is offline: jobs wait for it up to 24 hours, then fail", "fixes": [f"Start its service from the runner's directory: `./svc.sh start` in {mine[0]['dir']}; if it was never installed as a service, `./svc.sh install` first."]})
     for l in mine:
         if l["session_create"] and not l["env_token"]:
             problems.append({"problem": "session_create", "runner": l["name"], "why": "the runner's service runs in a security session of its own (SessionCreate in its plist), which cannot read the Claude login in the Keychain: scheduled runs fail with 'Not logged in'", "fixes": [

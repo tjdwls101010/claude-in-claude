@@ -1,0 +1,5 @@
+{
+ "exit": 1,
+ "stdout": "{\"message\":\"Could not create file: Changes must be made through a pull request.\",\"documentation_url\":\"https://docs.github.com/articles/about-protected-branches\",\"status\":\"409\"}",
+ "stderr": "gh: Could not create file: Changes must be made through a pull request. (HTTP 409)\n"
+}

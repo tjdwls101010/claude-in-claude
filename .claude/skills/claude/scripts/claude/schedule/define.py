@@ -75,13 +75,13 @@ def _existing(repo, file, branch):
     return current, spec
 
 
-def _runner(repo, tools):
+def _runner(repo, tools, runs_on):
     try:
         registered = runners(repo)
     except GitHubError as e:
         return {"registered": None, "local": local_runners(repo), "problems": [], "error": f"the runners could not be listed: {e.message}"}
     local = local_runners(repo)
-    return {"registered": registered, "local": local, "problems": runner_problems(registered, local, tools)}
+    return {"registered": registered, "local": local, "problems": runner_problems(registered, local, tools, runs_on)}
 
 
 def _fires(spec, now):
@@ -101,6 +101,8 @@ def schedule(*, name, flags, cwd, dry_run=False, public_ok=False, message=None):
     gh = _gh_ready()
     project, repo = _project(cwd)
     facts = _facts(repo)
+    # GitHub's spelling of the repository, as GITHUB_REPOSITORY gives it to the job: the dispatcher's label must be the one a one-off's Finish removes.
+    repo = facts["full_name"] or repo
     if not facts["private"] and not public_ok:
         raise Refusal(f"{repo} is public: its Actions logs and step summaries — the prompt, the answer and the activity — are public, and a self-hosted runner on a public repository runs code anyone's pull request brings onto this Mac", instead="schedule in a private repository, or pass --public-ok if you accept both")
     branch = facts["default_branch"]
@@ -119,34 +121,39 @@ def schedule(*, name, flags, cwd, dry_run=False, public_ok=False, message=None):
                 return same, current["text"]
         return spec, render_workflow(spec)
 
-    current, recorded = _existing(repo, file, branch)
-    spec, text = build(current, recorded)
-    calendar = calendar_entries(fields_of(spec))
-    argv = dispatcher_argv(gh["path"], repo, file, branch)
-    runner = _runner(repo, ("uv", "claude", "gh") if spec.get("at") else ("uv", "claude"))
-    settings = {k: spec[k] for k in ("profile", "model", "effort", "timeout", "worktree", "runs_on")}
+    def derived(spec):
+        """Everything that follows from the spec finally committed: the dispatcher's calendar and command, the runner check, the reply's settings."""
+        return calendar_entries(fields_of(spec)), dispatcher_argv(gh["path"], repo, file, branch), _runner(repo, ("uv", "claude", "gh") if spec.get("at") else ("uv", "claude"), spec["runs_on"]), {k: spec[k] for k in ("profile", "model", "effort", "timeout", "worktree", "runs_on")}
+
     if dry_run:
+        current, recorded = _existing(repo, file, branch)
+        spec, text = build(current, recorded)
+        calendar, argv, runner, settings = derived(spec)
         return {"name": name, "repo": repo, "dry_run": True, "workflow_path": f".github/workflows/{file}", "workflow_text": text, "dispatcher_label": label, "dispatcher_text": render_agent(label, argv, calendar, log), "fires": _fires(spec, now), "settings": settings, "runner": runner}
 
     warnings = []
-    commit_message = message or (f"Schedule Claude worker {name}: " + (f"once at {spec['at']} ({timezone})" if spec.get("at") else f"{spec['cron']} ({timezone})"))
+    # Read, merge, commit and install under the lock, so a second call on this Mac sees what the first committed (K8, K12).
     with schedule_lock(registry, name):
+        current, recorded = _existing(repo, file, branch)
+        spec, text = build(current, recorded)
         status = "unchanged"
         commit = url = None
         if current is None or current["text"] != text:
             for attempt in (1, 2):
+                message_text = message or (f"Schedule Claude worker {name}: " + (f"once at {spec['at']} ({timezone})" if spec.get("at") else f"{spec['cron']} ({timezone})"))
                 try:
-                    done = write_workflow(repo, file, text, commit_message, branch, sha=(current or {}).get("sha"))
+                    done = write_workflow(repo, file, text, message_text, branch, sha=(current or {}).get("sha"))
                     status, commit, url = "committed", done["commit"], done["url"]
                     break
                 except GitHubError as e:
                     if not e.conflict or attempt == 2:
-                        raise Refusal(f"GitHub refused the commit to {branch}: {e.message}", instead=f"{entry_path()} schedule … --dry-run prints the workflow; commit it through a pull request" if e.status == 422 else None)
-                    # Another schedule call changed the file first: merge onto what it committed and try once more (K12).
+                        raise Refusal(f"GitHub refused the commit to {branch}: {e.message}", instead=f"`schedule … --dry-run` prints the workflow file ({e.status and f'HTTP {e.status}'}); commit it through a pull request, then call `schedule` again to install the dispatcher")
+                    # Another call committed first: merge onto what it committed and try once more (K12).
                     current, recorded = _existing(repo, file, branch)
                     spec, text = build(current, recorded)
                     if current is not None and current["text"] == text:
                         break
+        calendar, argv, runner, settings = derived(spec)
         url = url or (current or {}).get("url")
         was_disabled = False
         try:
@@ -184,21 +191,28 @@ def unschedule(*, name, cwd, message=None):
     _gh_ready()
     project, repo = _project(cwd)
     facts = _facts(repo)
+    repo = facts["full_name"] or repo
     branch = facts["default_branch"]
     file = workflow_file(name)
     registry = resolve_runs_dir(project)
     reply = {"name": name, "repo": repo}
     with schedule_lock(registry, name):
-        reply["dispatcher"] = remove_agent(dispatcher_label(repo, name))
         try:
             current = read_workflow(repo, file, branch)
+        except GitHubError as e:
+            current, reply["workflow"] = None, {"status": "failed", "path": f".github/workflows/{file}", "error": e.message}
+        if current is not None and parse_spec_or_none(current["text"]) is None:
+            raise Refusal(f".github/workflows/{file} was not written by this skill; unschedule leaves it alone")
+        reply["dispatcher"] = remove_agent(dispatcher_label(repo, name))
+        if "workflow" not in reply:
             if current is None:
                 reply["workflow"] = {"status": "absent", "path": f".github/workflows/{file}"}
             else:
-                done = delete_workflow(repo, file, message or f"Unschedule Claude worker {name}", branch, current["sha"])
-                reply["workflow"] = {"status": "deleted", "path": f".github/workflows/{file}", "commit": done["commit"]}
-        except GitHubError as e:
-            reply["workflow"] = {"status": "failed", "path": f".github/workflows/{file}", "error": e.message}
+                try:
+                    done = delete_workflow(repo, file, message or f"Unschedule Claude worker {name}", branch, current["sha"])
+                    reply["workflow"] = {"status": "deleted", "path": f".github/workflows/{file}", "commit": done["commit"]}
+                except GitHubError as e:
+                    reply["workflow"] = {"status": "failed", "path": f".github/workflows/{file}", "error": e.message}
         live = schedule_runs_live(registry, name)
         if live:
             # The live run's Finish still needs its job's hand-over; only the definition goes, so it will not disable anything (K8).
@@ -209,12 +223,20 @@ def unschedule(*, name, cwd, message=None):
     return reply
 
 
+def parse_spec_or_none(text):
+    try:
+        return parse_spec(text)
+    except ValueError:
+        return None
+
+
 def schedules(*, cwd):
     """The repository's schedules (see `schedule --list`)."""
     refuse_inside_worker()
     _gh_ready(need_workflow_scope=False)
     project, repo = _project(cwd)
     facts = _facts(repo)
+    repo = facts["full_name"] or repo
     registry = resolve_runs_dir(project)
     out, names = [], set()
     try:

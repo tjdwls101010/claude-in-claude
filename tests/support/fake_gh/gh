@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """A stand-in for the `gh` CLI, first on PATH in schedule tests. It records every call (argv and stdin) under $FAKE_GH_STATE/calls/ and answers from a small simulated GitHub in $FAKE_GH_STATE/world.json, in the shapes of real `gh` output captured from a private repository (tests/support/fixtures/github/*.json: exit code, stdout and stderr per call, with tokens and emails blanked).
 
-world.json: {"auth": "ok" | "none" | "noscope", "repos": {"owner/name": {"private", "default_branch", "files": {path: {"text", "sha"}}, "workflows": {file: state}, "runners": [{"name", "status", "labels"}]}}, "race": n, "protected": bool}
-  race: the next n Contents PUTs first lose to another `schedule` call, which commits the file as it was (or, for a first create, what this call sends) under another definition id, and get the 409 a real loser got (stage 0 f).
-  protected: a Contents PUT or DELETE gets HTTP 422 as branch protection would (shape of a captured 422; the message is not a capture).
+world.json: {"auth": "ok" | "none" | "noscope", "repos": {"owner/name": {"private", "default_branch", "files": {path: {"text", "sha"}}, "workflows": {file: state}, "runners": [{"name", "status", "labels"}]}}, "race": n, "race_cron": expr, "protected": bool}
+  Repositories are found whatever the case of the owner and name, and answer with the key's spelling as `full_name`, as GitHub does.
+  race: the next n Contents PUTs first lose to another `schedule` call, which commits the file as it was (or, for a first create, what this call sends) under another definition id — and with `race_cron`, another cron — and get the 409 a real loser got (stage 0 f).
+  protected: a Contents PUT or DELETE gets the 409 a protected branch answered (captured).
 """
 
 import base64
@@ -100,9 +101,11 @@ if not m:
     print(f"fake gh: unsupported path {path}", file=sys.stderr)
     sys.exit(64)
 repo_name, rest = m.group(1), m.group(2) or ""
-repo = world["repos"].get(repo_name)
+canonical = next((k for k in world["repos"] if k.lower() == repo_name.lower()), None)
+repo = world["repos"].get(canonical) if canonical else None
 if repo is None:
     answer("repo-404")
+repo_name = canonical
 
 if rest == "":
     answer("repo", full_name=repo_name, private=repo.get("private", True), visibility="private" if repo.get("private", True) else "public", default_branch=repo.get("default_branch", "main"))
@@ -119,13 +122,19 @@ if c:
             answer("contents-get-404")
         answer("contents-get", name=name, path=fpath, sha=cur["sha"], content=base64.b64encode(cur["text"].encode()).decode(), html_url=url)
     if world.get("protected"):
-        error("contents-put-nosha", "Repository rule violations found\n\nChanges must be made through a pull request.", 422)
+        answer("contents-put-protected" if method == "PUT" else "contents-delete-protected")
     if method == "PUT":
         text = base64.b64decode(body["content"]).decode()
         if world.get("race", 0) > 0:
             world["race"] -= 1
             # The other call committed what was there (or, for a first create, what this call sends) under its own definition id.
             other = re.sub(r'(--definition |"definition": ")([0-9a-f]+)', lambda m: m.group(1) + "0th3r0ne", cur["text"] if cur else text)
+            if world.get("race_cron"):
+                new = world["race_cron"]
+                other = re.sub(r'("cron": ")[^"]*(")', lambda m: m.group(1) + new + m.group(2), other)
+                other = re.sub(r"(- cron: ')[^']*(')", lambda m: m.group(1) + new + m.group(2), other)
+                other = re.sub(r'(\\"--cron\\" \\")[^\\]*(\\")', lambda m: m.group(1) + new + m.group(2), other)
+                other = re.sub(r"(--cron ')[^']*(')", lambda m: m.group(1) + new + m.group(2), other)
             files[fpath] = {"text": other, "sha": sha_of(other)}
             repo.setdefault("workflows", {})[name] = "active"
             save()
@@ -167,8 +176,11 @@ if w:
 if rest == "actions/workflows":
     f = json.loads(fixture("workflows-list")["stdout"])
     template = f["workflows"][0]
-    f["workflows"] = [{**template, "name": file, "path": f".github/workflows/{file}", "state": state} for file, state in sorted(repo.get("workflows", {}).items())]
-    f["total_count"] = len(f["workflows"])
+    query = dict(q.split("=", 1) for q in (path.split("?", 1)[1].split("&") if "?" in path else []))
+    per, page = int(query.get("per_page", 30)), int(query.get("page", 1))
+    every = [{**template, "name": file, "path": f".github/workflows/{file}", "state": state} for file, state in sorted(repo.get("workflows", {}).items())]
+    f["workflows"] = every[(page - 1) * per : page * per]
+    f["total_count"] = len(every)
     print(json.dumps(f))
     sys.exit(0)
 

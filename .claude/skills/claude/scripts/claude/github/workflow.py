@@ -47,8 +47,13 @@ def _block(text, indent):
 
 
 def _q(text):
-    """A shell word for the step's `run:` line, `${{` escaped as everywhere."""
-    return _escape(shlex.quote(str(text)))
+    """A shell word for the step's `run:` line."""
+    return shlex.quote(str(text))
+
+
+def _string(text):
+    """A YAML double-quoted string (JSON's syntax is a subset of it), `${{` escaped: no path, label or model can end a value early (` #`), open a mapping (`: `) or change type (`true`, `123`)."""
+    return _escape(json.dumps(text, ensure_ascii=False))
 
 
 def _step_args(step, spec):
@@ -58,7 +63,7 @@ def _step_args(step, spec):
     if spec.get("worktree"):
         args.append("--worktree")
     args += ["--workflow", workflow_file(spec["name"]), "--definition", spec["definition"]]
-    return f'uv run {_q(spec["cli"])} ' + " ".join(_q(a) for a in args)
+    return _string(f'uv run {_q(spec["cli"])} ' + " ".join(_q(a) for a in args))
 
 
 def _env(spec, indent, token):
@@ -82,7 +87,7 @@ def render_workflow(spec):
         cron = spec["cron"]
     record = {k: spec.get(k) for k in SPEC_KEYS}
     permissions = "permissions:\n  actions: write" if spec.get("at") else "permissions: {}"
-    runs_on = ", ".join(spec["runs_on"])
+    runs_on = ", ".join(_string(label) for label in spec["runs_on"])
     minutes = math.ceil(int(spec["timeout"]) / 60) + 10
     return "\n".join([
         HEADER,

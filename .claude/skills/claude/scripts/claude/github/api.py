@@ -13,13 +13,13 @@ REMOTE = re.compile(r"^(?:https://(?:[^@/]+@)?github\.com/|git@github\.com:|ssh:
 
 
 class GitHubError(Exception):
-    """A gh call GitHub refused. `status` is the HTTP status (None when gh failed otherwise); `conflict` says another write changed the file first — a stale or missing `sha` (HTTP 409, or 422 "sha wasn't supplied", which is what the loser of two first creates can get)."""
+    """A gh call GitHub refused. `status` is the HTTP status (None when gh failed otherwise). `conflict` says another write changed the file first: a stale `sha` (409 "is at … but expected …" or "… does not match …", what the loser of two first creates got — stage 0 f) or a missing one (422 "sha wasn't supplied"). A protected branch also answers 409 ("Changes must be made through a pull request", captured), and is not a conflict."""
 
     def __init__(self, message, status=None):
         super().__init__(message)
         self.message = message
         self.status = status
-        self.conflict = status == 409 or (status == 422 and "\"sha\" wasn't supplied" in message)
+        self.conflict = (status == 409 and (" but expected " in message or " does not match " in message)) or (status == 422 and "\"sha\" wasn't supplied" in message)
 
 
 def gh_path():
@@ -134,13 +134,16 @@ def set_workflow_enabled(repo, file, enabled):
 
 def list_workflows(repo, prefix):
     """The repository's workflows whose file name starts with `prefix`: `[{file, state}]`."""
-    data = _api(f"repos/{repo}/actions/workflows?per_page=100")
-    out = []
-    for w in data.get("workflows") or []:
-        file = (w.get("path") or "").rsplit("/", 1)[-1]
-        if (w.get("path") or "").startswith(WORKFLOWS + "/") and file.startswith(prefix):
-            out.append({"file": file, "state": w.get("state")})
-    return out
+    out, page = [], 1
+    while True:
+        batch = _api(f"repos/{repo}/actions/workflows?per_page=100&page={page}").get("workflows") or []
+        for w in batch:
+            file = (w.get("path") or "").rsplit("/", 1)[-1]
+            if (w.get("path") or "").startswith(WORKFLOWS + "/") and file.startswith(prefix):
+                out.append({"file": file, "state": w.get("state")})
+        if len(batch) < 100:
+            return out
+        page += 1
 
 
 def runners(repo):

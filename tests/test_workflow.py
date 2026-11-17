@@ -19,6 +19,24 @@ on:
 SPEC = {"name": "nightly-review", "cron": "0 3 * * *", "at": None, "timezone": "Asia/Seoul", "profile": "read-only", "model": "sonnet", "effort": "high", "timeout": 3600, "worktree": False, "runs_on": ["self-hosted"], "project": "/Users/someone/Coding/my project", "cli": "/Users/someone/.claude/skills/claude/scripts/cli.py", "definition": "3f9a1c2e", "prompt": "Review yesterday's commits.\n", "schema": None}
 
 
+class Runners(unittest.TestCase):
+    """runner_problems judges the runners that can take the job — this Mac's, with every label --runs-on asks for."""
+
+    LOCAL = [{"name": "mac", "plist": "/p", "dir": "/r", "session_create": False, "env_token": False, "path_has": {"uv": True, "claude": True, "gh": True}}]
+
+    def kinds(self, registered, runs_on=("self-hosted",)):
+        return [p["problem"] for p in github.runner_problems(registered, self.LOCAL, runs_on=runs_on)]
+
+    def test_this_macs_runner_must_be_the_online_one(self):
+        self.assertEqual(self.kinds([{"name": "mac", "status": "offline", "labels": ["self-hosted"]}, {"name": "other", "status": "online", "labels": ["self-hosted"]}]), ["offline"])
+        self.assertEqual(self.kinds([{"name": "mac", "status": "online", "labels": ["self-hosted"]}]), [])
+
+    def test_labels_must_match(self):
+        registered = [{"name": "mac", "status": "online", "labels": ["self-hosted", "macOS"]}]
+        self.assertEqual(self.kinds(registered, ("self-hosted", "gpu")), ["none"])
+        self.assertEqual(self.kinds(registered, ("self-hosted", "macOS")), [])
+
+
 class Spec(unittest.TestCase):
     def test_reads_a_hand_written_spec_line(self):
         self.assertEqual(github.parse_spec(HAND_WRITTEN), {"at": None, "cli": "/s/cli.py", "cron": "0 3 * * *", "definition": "3f9a1c2e", "effort": "high", "model": "sonnet", "name": "nightly-review", "profile": "read-only", "project": "/p", "prompt": "Review\nyesterday", "runs_on": ["self-hosted"], "schema": None, "timeout": 3600, "timezone": "Asia/Seoul", "worktree": False})
