@@ -170,6 +170,16 @@ def outcome(meta, run_dir, returncode):
     return fields
 
 
+# claude starts behind a gate: a shell that waits on a pipe and only then becomes claude with `exec`, keeping its pid. Nothing of claude runs, not even its startup hooks, until the supervisor has recorded that pid and found no stop request.
+GATE = 'read -r go <&"$0" && [ "$go" = go ] && exec "$@"; exit 125'
+
+
+def record_stopped(m):
+    """Record a stop that no claude process reported: interrupted, with every message that was never delivered — all of them when claude never ran."""
+    if m.get("state") not in TERMINAL:
+        m.update({"state": "interrupted", "error": "stopped", "ended_at": now(), "stdin_open": False, "undelivered": [x["uuid"] for x in m.get("messages") or [] if x.get("after_line") is None]})
+
+
 def supervise(run_dir):
     """Run one claude process for the run in `run_dir` to its end. Exits when the process has and the outcome is recorded."""
     t = timings()
@@ -178,12 +188,41 @@ def supervise(run_dir):
     update_meta(run_dir, lambda m: m.update({"supervisor_pid": os.getpid(), "supervisor_pgid": os.getpgid(0)}))
     env = worker_env(dict(os.environ), meta["run_id"])
     stderr_file = open(Path(run_dir) / "stderr.log", "ab")
+    time.sleep(t["pause_before_launch"])
+    # `stop` can signal claude only once its pid is recorded, so a stop that lands before that is honoured here (K25): before launching, and when the pid is recorded — under the run's lock, as `stop` sets its request and reads the pid under it, so whichever comes second sees the other.
+    if update_meta(run_dir, lambda m: m.get("stop_requested") and record_stopped(m)).get("state") in TERMINAL:
+        log(run_dir, "stopped before claude was launched")
+        stderr_file.close()
+        return 0
+    gate_read, gate_write = os.pipe()
     try:
-        proc = subprocess.Popen(meta["argv"], cwd=meta["launch_cwd"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr_file, env=env, start_new_session=True)
+        proc = subprocess.Popen(["/bin/sh", "-c", GATE, str(gate_read), *meta["argv"]], cwd=meta["launch_cwd"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr_file, env=env, start_new_session=True, pass_fds=(gate_read,))
     except OSError as e:
+        os.close(gate_read)
+        os.close(gate_write)
         record_if_active(run_dir, {"state": "failed", "error": f"could not start claude: {e}", "ended_at": now(), "stdin_open": False})
         return 1
-    update_meta(run_dir, lambda m: m.update({"claude_pid": proc.pid, "claude_pgid": proc.pid, "started_at": now()}))
+    os.close(gate_read)
+    time.sleep(t["pause_before_pid"])
+
+    def record_pid(m):
+        m.update({"claude_pid": proc.pid, "claude_pgid": proc.pid, "started_at": now()})
+        if m.get("stop_requested"):
+            record_stopped(m)
+
+    recorded = update_meta(run_dir, record_pid)
+    if recorded.get("state") in TERMINAL:
+        # Closing the gate unopened makes the shell exit without ever running claude.
+        os.close(gate_write)
+        proc.wait()
+        stderr_file.close()
+        log(run_dir, "stopped before claude ran")
+        return 0
+    try:
+        os.write(gate_write, b"go\n")
+    except OSError as e:
+        log(run_dir, f"could not open the gate: {e}")
+    os.close(gate_write)
     log(run_dir, f"claude pid {proc.pid}: {' '.join(meta['argv'][:3])} …")
     wt = meta.get("worktree")
 

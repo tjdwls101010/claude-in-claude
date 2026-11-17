@@ -9,12 +9,12 @@ from pathlib import Path
 
 from claude.errors import Refusal
 from claude.git import is_worktree, uncommitted_count
-from claude.registry import TERMINAL, claude_alive, enqueue, find_run, group_view, is_live, read_meta, reap, record_if_active, registry_args, resolve_runs_dir, supervisor_alive, update_meta
+from claude.registry import TERMINAL, claude_alive, enqueue, find_run, group_view, is_live, read_meta, reap, registry_args, resolve_runs_dir, supervisor_alive, update_meta
 from claude.util import invocation, now, process_command, timings
 
 from .create import create_run, default_cwd, refuse_inside_worker, start_reply
 from .settings import settings_for
-from .supervisor import signal_ladder
+from .supervisor import record_stopped, signal_ladder
 
 
 def start(*, prompt, cwd, flags, label=None, timeout=None, runs_dir=None):
@@ -132,7 +132,10 @@ def stop_one(run_dir):
         entry.update({"state": meta["state"], "note": "already ended"})
         return entry
     if meta.get("state") not in TERMINAL:
-        update_meta(run_dir, lambda m: m.update({"stop_requested": now()}) if m.get("state") not in TERMINAL else None)
+        time.sleep(timings()["pause_before_stop_mark"])
+        # Set under the run's lock and read back with the pid: a supervisor that records claude's pid after this sees the request and stops claude itself (K25).
+        meta = update_meta(run_dir, lambda m: m.update({"stop_requested": now()}) if m.get("state") not in TERMINAL else None)
+        still = claude_alive(meta)
     pgid, pid = meta.get("claude_pgid"), meta.get("claude_pid")
     command = process_command(pid) if pid else None
     if pgid and pid and still and not ("claude" in (command or "") and "stream-json" in (command or "")):
@@ -149,8 +152,7 @@ def stop_one(run_dir):
             break
         time.sleep(0.05)
     if meta.get("state") not in TERMINAL:
-        record_if_active(run_dir, {"state": "interrupted", "error": "stopped", "ended_at": now(), "stdin_open": False})
-        meta = read_meta(run_dir)
+        meta = update_meta(run_dir, record_stopped)
     entry["state"] = meta.get("state")
     return entry
 
