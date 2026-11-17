@@ -34,6 +34,7 @@ It records every invocation (argv, cwd, environment, the stdin messages it read)
   ccwrites          create the empty .claude/.cc-writes/ Claude Code makes at the first sandboxed Bash call
   commit:MSG        commit everything in cwd with message MSG
   write_after:PATH  after commit:MSG, write "y" to PATH (relative to cwd)
+  delete_after:PATH after commit:MSG, delete PATH
   branch:NAME       after commit:MSG and write_after, switch to a new branch NAME
   ignore_sigint / ignore_sigterm
 
@@ -417,6 +418,8 @@ def run_turn(first):
             subprocess.run(["git", "-c", "user.email=w@example.com", "-c", "user.name=w", "commit", "-q", "-m", str(mark(ms, "commit"))], cwd=cwd, capture_output=True)
         if mark(ms, "write_after"):
             (Path(cwd) / mark(ms, "write_after")).write_text("y\n")
+        if mark(ms, "delete_after"):
+            (Path(cwd) / mark(ms, "delete_after")).unlink()
         if mark(ms, "branch"):
             subprocess.run(["git", "checkout", "-q", "-b", str(mark(ms, "branch"))], cwd=cwd, capture_output=True)
         if mark(ms, "edit_error"):

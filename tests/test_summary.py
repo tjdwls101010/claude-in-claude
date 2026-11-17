@@ -164,6 +164,15 @@ class Rendered(unittest.TestCase):
         self.assertIn("<b>Continue on your Mac</b>", text)
         self.assertIn("12000 files changed during the run", text)
 
+    def test_every_section_at_its_limit_still_fits(self):
+        files = [{"status": "??", "path": "p/" + "e" * 975 + f"{n:03d}", "new_lines": 1} for n in range(500)]
+        snap = self.run_dir()
+        snap["text"] = "a" * 400_000
+        text = schedule.render_summary(snap, self.context(prompt="b" * 50_000, changes={"where": "the project checkout", "files": files}))
+        self.assertLess(len(text.encode()), 900_000)
+        self.assertEqual(text.count("<details"), text.count("</details>"))
+        self.assertIn("<b>Continue on your Mac</b>", text)
+
     def test_table_rows_escape_pipes_in_branch_names(self):
         text = schedule.render_summary(self.run_dir(), self.context(tree={"kind": "checkout", "branch": "fix|x", "head": "abc1234", "uncommitted_before": 0}))
         row = next(l for l in text.splitlines() if l.startswith("| **Local tree**"))

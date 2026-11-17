@@ -285,7 +285,8 @@ def _merged(committed, working):
         if c is None:
             by_path[f["path"]] = f
         elif f.get("note") != "no longer changed: reverted or committed":
-            c["note"] = "committed, then changed again"
+            c["note"] = "committed, then deleted" if "D" in f["status"] else "committed, then changed again"
+            c["uncommitted_too"] = True
     return [by_path[p] for p in sorted(by_path)]
 
 

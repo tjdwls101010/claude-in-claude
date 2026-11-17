@@ -369,6 +369,12 @@ class Trees(Job):
         head = summary.split("<b>Changes</b>", 1)[1].split("</summary>", 1)[0]
         self.assertIn("1 file changed during the run", head)
 
+    def test_a_file_committed_then_deleted_says_so(self):
+        run, finish, summary = self.job(self.job_env(prompt="x [[fake:write:new.txt]] [[fake:commit:work]] [[fake:delete_after:new.txt]]"))
+        head, body = summary.split("<b>Changes</b>", 1)[1].split("</summary>", 1)
+        self.assertIn("committed, then deleted", body.split("</details>", 1)[0])
+        self.assertIn("uncommitted", head, "a deletion after the commit is not committed")
+
     def test_a_branch_switch_without_a_commit_is_shown(self):
         run, finish, summary = self.job(self.job_env(prompt="x [[fake:branch:another]]"))
         self.assertIn("HEAD moved during the run: `main @", summary)

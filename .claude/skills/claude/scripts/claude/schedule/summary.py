@@ -14,6 +14,13 @@ ANSWER_BYTES = 400_000
 PROMPT_BYTES = 50_000
 ACTIVITY_ROWS = 300
 CHANGE_ROWS = 500
+CHANGE_BYTES = 100_000
+# Tighter limits, tried in turn when every section at its limit still would not fit the step summary.
+FALLBACKS = ({}, {"activity": False}, {"activity": False, "change_rows": 50, "answer": 200_000, "prompt": 20_000}, {"activity": False, "change_rows": 0, "answer": 100_000, "prompt": 10_000})
+
+
+def _limit(context, key, default):
+    return (context.get("_limits") or {}).get(key, default)
 EXCERPTS_BYTES = 100_000
 TOTAL_BYTES = 900_000
 DETAIL_CHARS = 100
@@ -237,7 +244,7 @@ def _prompt(context, cuts):
     text = context.get("prompt")
     if not text:
         return None
-    text, cut = _cut(text, PROMPT_BYTES, "The prompt", "the workflow file holds it whole")
+    text, cut = _cut(text, _limit(context, "prompt", PROMPT_BYTES), "The prompt", "the workflow file holds it whole")
     if cut:
         cuts.append(cut)
     return _details("<b>Prompt</b>", _fence(text, "text", minimum=4))
@@ -247,14 +254,14 @@ def _answer(snapshot, context, cuts):
     if snapshot["schema"]:
         if snapshot["json"] is None:
             return None
-        text, cut = _cut(json.dumps(snapshot["json"], indent=2, ensure_ascii=False), ANSWER_BYTES, "The answer", f"`{context['log_call'].replace(' log ', ' result ')}` prints it whole")
+        text, cut = _cut(json.dumps(snapshot["json"], indent=2, ensure_ascii=False), _limit(context, "answer", ANSWER_BYTES), "The answer", f"`{context['log_call'].replace(' log ', ' result ')}` prints it whole")
         if cut:
             cuts.append(cut)
         return _fence(text, "json")
     text = (snapshot.get("text") or "").strip("\n")
     if not text:
         return None
-    text, cut = _cut(text, ANSWER_BYTES, "The answer", f"`{context['log_call'].replace(' log ', ' result ')}` prints it whole")
+    text, cut = _cut(text, _limit(context, "answer", ANSWER_BYTES), "The answer", f"`{context['log_call'].replace(' log ', ' result ')}` prints it whole")
     if cut:
         cuts.append(cut)
     return text
@@ -267,9 +274,13 @@ def _changes(snapshot, context):
         return None
     files = ch.get("files") or []
     lines = []
-    shown = files[:CHANGE_ROWS]
-    width = max((len(f["path"]) for f in shown), default=0)
-    for f in shown:
+    shown = files[: _limit(context, "change_rows", CHANGE_ROWS)]
+    width = min(max((len(f["path"]) for f in shown), default=0), 80)
+    used = 0
+    for n, f in enumerate(shown):
+        if used > CHANGE_BYTES:
+            shown = shown[:n]
+            break
         if f.get("note"):
             what = f"({f['note']})"
         elif f.get("new_lines") is not None:
@@ -283,12 +294,14 @@ def _changes(snapshot, context):
         if f.get("committed") and "committed" not in what:
             what = (what + " committed").strip()
         lines.append(f"{f['status'].ljust(2)} {f['path'].ljust(width)}  {what}".rstrip())
+        used += len(lines[-1].encode("utf-8"))
     where = ch.get("where") or "the project checkout"
     committed = sum(1 for f in files if f.get("committed"))
-    state = "" if not files else (", uncommitted" if not committed else (", committed" if committed == len(files) else f", {committed} of them committed"))
+    pending = sum(1 for f in files if not f.get("committed") or f.get("uncommitted_too"))
+    state = "" if not files else (", uncommitted" if not committed else (", committed" if not pending else f", {committed} committed, {pending} with uncommitted changes"))
     head = f"<b>Changes</b> · {len(files)} file{'s' if len(files) != 1 else ''} changed during the run in {where}{state}"
-    if len(files) > CHANGE_ROWS:
-        lines.append(f"… and {len(files) - CHANGE_ROWS} more")
+    if len(files) > len(shown):
+        lines.append(f"… and {len(files) - len(shown)} more")
     body = [_fence("\n".join(lines), "text")] if lines else ["Nothing changed."]
     moved = ch.get("head_moved")
     if moved:
@@ -426,6 +439,15 @@ def _table(rows):
 
 
 def render_summary(snapshot, context):
+    """The summary's markdown (see `_render`), within GitHub's step summary limit: when every section at its own limit would still be too much, the activity goes, then the change list and the answer shrink, before anything is cut blindly."""
+    for limits in FALLBACKS:
+        text = _render(snapshot, {**context, "_limits": limits})
+        if len(text.encode("utf-8")) <= TOTAL_BYTES:
+            return text
+    return trim_bytes(text, TOTAL_BYTES) + "\n\n…cut to fit GitHub's step summary limit\n"
+
+
+def _render(snapshot, context):
     """The summary's markdown. `snapshot` is `observe.snapshot` of the run, or None when the job started no worker (skipped, a check, a refusal); `context` carries what the run cannot know: `name`, `timezone`, `trigger` ({kind, attempt, retry_of_url}), `slot`, `prompt`, `tree` (what the worker saw), `changes`, `attention` seen while it ran, `warnings` from the Finish step, `stopped_by_finish`, `outcome` (for no worker: {kind: skipped|check|refused|missing, …}), `continue` ({cli, project, run_dir}) and `log_call`."""
     cuts = []
     parts = [_title(snapshot, context)]
@@ -450,17 +472,12 @@ def render_summary(snapshot, context):
         answer = _answer(snapshot, context, cuts)
         if answer:
             parts.append(answer)
-        tail = [x for x in (_changes(snapshot, context), _activity(snapshot, context, cuts), _continue(snapshot, context)) if x]
+        tail = [x for x in (_changes(snapshot, context), _activity(snapshot, context, cuts) if _limit(context, "activity", True) else None, _continue(snapshot, context)) if x]
         if tail:
             parts.append("---")
             parts += tail
+    if snapshot and not _limit(context, "activity", True):
+        cuts.append(f"The activity was left out to fit GitHub's step summary limit; `{context.get('log_call')}` prints it")
     if cuts:
         parts.append("> [!NOTE]\n" + _quote(cuts))
-    text = "\n\n".join(parts) + "\n"
-    if len(text.encode("utf-8")) > TOTAL_BYTES:
-        # Within the section limits this cannot happen; should it, the activity goes before anything is cut blindly.
-        parts = [p for p in parts if "<b>Activity</b>" not in p] + [f"> [!NOTE]\n> The activity was left out to fit GitHub's step summary limit; `{context.get('log_call')}` prints it."]
-        text = "\n\n".join(parts) + "\n"
-    if len(text.encode("utf-8")) > TOTAL_BYTES:
-        text = trim_bytes(text, TOTAL_BYTES) + "\n\n…cut to fit GitHub's step summary limit\n"
-    return text
+    return "\n\n".join(parts) + "\n"
