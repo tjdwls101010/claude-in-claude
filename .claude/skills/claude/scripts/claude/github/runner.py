@@ -57,8 +57,8 @@ def local_runners(repo):
 def runner_problems(registered, local, tools=("uv", "claude"), runs_on=("self-hosted",)):
     """What keeps scheduled workers from running, as `[{problem, why, fixes}]` — `none`, `offline`, `not_local`, `session_create`, `path_missing` — from the runners GitHub lists for the repository (`registered`), the services on this Mac (`local`), the `tools` jobs need on their PATH (gh too for a one-off, whose Finish step disables its workflow) and the labels a job asks for (`runs_on`). Only this Mac's services of runners with every label count: the workflow names paths on this Mac. Where there is more than one way to fix it, every way is given: which one is the Mac's owner's choice."""
     problems = []
-    wanted = set(runs_on)
-    fitting = [r for r in registered if wanted <= set(r.get("labels") or [])]
+    wanted = {l.casefold() for l in runs_on}  # GitHub matches runner labels whatever their case
+    fitting = [r for r in registered if wanted <= {l.casefold() for l in r.get("labels") or []}]
     if registered and not fitting:
         problems.append({"problem": "none", "why": f"no runner of this repository has every label {', '.join(sorted(wanted))}: a scheduled job waits in GitHub's queue and fails after 24 hours", "fixes": ["Give this Mac's runner the missing labels (the repository's Settings → Actions → Runners), or schedule with --runs-on labels it has."]})
         return problems

@@ -5,6 +5,7 @@ world.json: {"auth": "ok" | "none" | "noscope", "repos": {"owner/name": {"privat
   Repositories are found whatever the case of the owner and name, and answer with the key's spelling as `full_name`, as GitHub does.
   race: the next n Contents PUTs first lose to another `schedule` call, which commits the file as it was (or, for a first create, what this call sends) under another definition id — and with `race_cron`, another cron — and get the 409 a real loser got (stage 0 f).
   protected: a Contents PUT or DELETE gets the 409 a protected branch answered (captured).
+  offline: a Contents PUT fails as gh does without a network: a message on stderr, no HTTP status.
 """
 
 import base64
@@ -121,6 +122,9 @@ if c:
         if cur is None:
             answer("contents-get-404")
         answer("contents-get", name=name, path=fpath, sha=cur["sha"], content=base64.b64encode(cur["text"].encode()).decode(), html_url=url)
+    if world.get("offline") and method != "GET":
+        print("error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com", file=sys.stderr)
+        sys.exit(1)
     if world.get("protected"):
         answer("contents-put-protected" if method == "PUT" else "contents-delete-protected")
     if method == "PUT":

@@ -9,7 +9,7 @@ from support.harness import engine
 
 github = engine("claude.github")
 
-HAND_WRITTEN = """# Written by hand for this test.
+HAND_WRITTEN = """# Written by the claude skill's `schedule` command. Run it again with the same --name to change it; `unschedule` removes it.
 # spec: {"at": null, "cli": "/s/cli.py", "cron": "0 3 * * *", "definition": "3f9a1c2e", "effort": "high", "model": "sonnet", "name": "nightly-review", "profile": "read-only", "project": "/p", "prompt": "Review\\nyesterday", "runs_on": ["self-hosted"], "schema": null, "timeout": 3600, "timezone": "Asia/Seoul", "worktree": false}
 name: claude · nightly-review
 on:
@@ -35,14 +35,16 @@ class Runners(unittest.TestCase):
         registered = [{"name": "mac", "status": "online", "labels": ["self-hosted", "macOS"]}]
         self.assertEqual(self.kinds(registered, ("self-hosted", "gpu")), ["none"])
         self.assertEqual(self.kinds(registered, ("self-hosted", "macOS")), [])
+        self.assertEqual(self.kinds(registered, ("self-hosted", "macos")), [], "GitHub matches labels whatever their case")
 
 
 class Spec(unittest.TestCase):
     def test_reads_a_hand_written_spec_line(self):
         self.assertEqual(github.parse_spec(HAND_WRITTEN), {"at": None, "cli": "/s/cli.py", "cron": "0 3 * * *", "definition": "3f9a1c2e", "effort": "high", "model": "sonnet", "name": "nightly-review", "profile": "read-only", "project": "/p", "prompt": "Review\nyesterday", "runs_on": ["self-hosted"], "schema": None, "timeout": 3600, "timezone": "Asia/Seoul", "worktree": False})
         self.assertIsNone(github.parse_spec("name: someone else's workflow\non: push\n"))
+        self.assertIsNone(github.parse_spec('# spec: {"name": "x"}\nname: not ours\n'), "a spec line without the skill's header is not ours")
         with self.assertRaises(ValueError):
-            github.parse_spec("# spec: [1, 2]\n")
+            github.parse_spec(HAND_WRITTEN.splitlines()[0] + "\n# spec: [1, 2]\n")
 
     def test_round_trip(self):
         tricky = {**SPEC, "prompt": "  indented first line\n\ttab and ${{ secrets.X }} and $HOME and `ticks` and 'quotes' \"too\"\n\n한글 줄\ntrailing spaces   \n\n\n"}

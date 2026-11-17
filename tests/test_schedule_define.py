@@ -323,12 +323,29 @@ class Refusals(Scheduling):
         reply = self.cli_json("schedule", "--name", "mine", "x", "--cron", "0 3 * * *", "--profile", "read-only", expect=1)
         self.assertIn("was not written by this skill", reply["error"])
 
+    def test_a_refusal_writes_nothing_here_either(self):
+        self.cli_json("schedule", "--name", "nightly", "--cron", "0 3 * * *", "--profile", "read-only", expect=2)
+        self.assertFalse(self.runs_dir().exists(), "a refusal leaves no registry behind")
+
+    def test_a_network_failure_is_not_sent_to_a_pull_request(self):
+        self.world(offline=True)
+        reply = self.new(expect=1)
+        self.assertIn("error connecting", reply["error"])
+        self.assertNotIn("pull request", reply.get("instead") or "")
+
     def test_inside_a_worker(self):
         reply = self.cli_json("schedule", "--name", "nightly", "x", "--cron", "0 3 * * *", "--profile", "read-only", expect=1, env={"CLAUDE_SKILL_RUN": "r1"})
         self.assertIn("inside worker run", reply["error"])
 
 
 class Unschedule(Scheduling):
+    def test_a_workflow_with_a_spec_line_of_its_own_is_left_alone(self):
+        w = self.world()
+        w["repos"][REPO]["files"][".github/workflows/claude-mine.yml"] = {"text": "# spec: {}\nname: mine\non: push\n", "sha": "abc"}
+        self.world(w)
+        self.assertIn("was not written by this skill", self.cli_json("unschedule", "--name", "mine", expect=1)["error"])
+        self.assertIn("was not written by this skill", self.cli_json("schedule", "--name", "mine", "x", "--cron", "0 3 * * *", "--profile", "read-only", expect=1)["error"])
+
     def test_a_file_this_skill_did_not_write_is_left_alone(self):
         w = self.world()
         w["repos"][REPO]["files"][".github/workflows/claude-code-review.yml"] = {"text": "name: review\non: pull_request\n", "sha": "abc"}

@@ -70,7 +70,7 @@ def _existing(repo, file, branch):
         spec = parse_spec(current["text"])
     except ValueError as e:
         raise Refusal(f".github/workflows/{file} has a spec line that does not parse ({e}); fix or delete the file")
-    if spec is None:
+    if spec is None or spec.get("name") != file[len(PREFIX):-len(".yml")]:
         raise Refusal(f".github/workflows/{file} exists and was not written by this skill; choose another --name")
     return current, spec
 
@@ -121,19 +121,25 @@ def schedule(*, name, flags, cwd, dry_run=False, public_ok=False, message=None):
                 return same, current["text"]
         return spec, render_workflow(spec)
 
+    def refusals_first():
+        """The refusals that need only what GitHub already holds, checked before the lock — which creates the registry — so a refusal writes nothing on this Mac."""
+        current, recorded = _existing(repo, file, branch)
+        return build(current, recorded)
+
     def derived(spec):
         """Everything that follows from the spec finally committed: the dispatcher's calendar and command, the runner check, the reply's settings."""
         return calendar_entries(fields_of(spec)), dispatcher_argv(gh["path"], repo, file, branch), _runner(repo, ("uv", "claude", "gh") if spec.get("at") else ("uv", "claude"), spec["runs_on"]), {k: spec[k] for k in ("profile", "model", "effort", "timeout", "worktree", "runs_on")}
 
     if dry_run:
-        current, recorded = _existing(repo, file, branch)
-        spec, text = build(current, recorded)
+        spec, text = refusals_first()
         calendar, argv, runner, settings = derived(spec)
         return {"name": name, "repo": repo, "dry_run": True, "workflow_path": f".github/workflows/{file}", "workflow_text": text, "dispatcher_label": label, "dispatcher_text": render_agent(label, argv, calendar, log), "fires": _fires(spec, now), "settings": settings, "runner": runner}
 
     warnings = []
-    # Read, merge, commit and install under the lock, so a second call on this Mac sees what the first committed (K8, K12).
+    refusals_first()
+    # Read, merge, commit and install under the lock, so a second call on this Mac sees what the first committed (K8, K12); the clock is read again inside, since waiting for the lock can take a one-off's time past.
     with schedule_lock(registry, name):
+        now = clock()
         current, recorded = _existing(repo, file, branch)
         spec, text = build(current, recorded)
         status = "unchanged"
@@ -147,7 +153,9 @@ def schedule(*, name, flags, cwd, dry_run=False, public_ok=False, message=None):
                     break
                 except GitHubError as e:
                     if not e.conflict or attempt == 2:
-                        raise Refusal(f"GitHub refused the commit to {branch}: {e.message}", instead=f"`schedule … --dry-run` prints the workflow file ({e.status and f'HTTP {e.status}'}); commit it through a pull request, then call `schedule` again to install the dispatcher")
+                        if e.status is None:
+                            raise Refusal(f"the commit to {branch} failed: {e.message}", instead="nothing was written; run the same command again once gh reaches GitHub")
+                        raise Refusal(f"GitHub refused the commit to {branch} (HTTP {e.status}): {e.message}", instead="`schedule … --dry-run` prints the workflow file; commit it through a pull request, then call `schedule` again to install the dispatcher")
                     # Another call committed first: merge onto what it committed and try once more (K12).
                     current, recorded = _existing(repo, file, branch)
                     spec, text = build(current, recorded)
@@ -201,7 +209,7 @@ def unschedule(*, name, cwd, message=None):
             current = read_workflow(repo, file, branch)
         except GitHubError as e:
             current, reply["workflow"] = None, {"status": "failed", "path": f".github/workflows/{file}", "error": e.message}
-        if current is not None and parse_spec_or_none(current["text"]) is None:
+        if current is not None and (parse_spec_or_none(current["text"]) or {}).get("name") != name:
             raise Refusal(f".github/workflows/{file} was not written by this skill; unschedule leaves it alone")
         reply["dispatcher"] = remove_agent(dispatcher_label(repo, name))
         if "workflow" not in reply:

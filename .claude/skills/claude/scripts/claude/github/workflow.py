@@ -91,7 +91,7 @@ def render_workflow(spec):
     minutes = math.ceil(int(spec["timeout"]) / 60) + 10
     return "\n".join([
         HEADER,
-        SPEC_PREFIX + json.dumps(record, ensure_ascii=False, sort_keys=True),
+        SPEC_PREFIX + json.dumps(record, ensure_ascii=False, sort_keys=True).replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"),
         f"name: claude · {name}",
         f"run-name: {name} · ${{{{ inputs.mode == 'check' && 'check' || inputs.source || github.event_name }}}}",
         "on:",
@@ -133,11 +133,13 @@ def render_workflow(spec):
 
 
 def parse_spec(text):
-    """The definition a workflow's `# spec:` line holds, or None when the text has none (a workflow this skill did not write). ValueError when the line is there but is not a JSON object."""
+    """The definition a workflow's `# spec:` line holds, or None when the workflow is not one this skill wrote: its first line is not the skill's header, or it has no spec line, or the spec names no schedule. ValueError when the line is there but is not a JSON object."""
+    if not (text or "").startswith(HEADER + "\n"):
+        return None
     for line in (text or "").splitlines():
         if line.startswith(SPEC_PREFIX):
             obj = json.loads(line[len(SPEC_PREFIX):])
             if not isinstance(obj, dict):
                 raise ValueError("the spec line does not hold a JSON object")
-            return obj
+            return obj if obj.get("name") else None
     return None
