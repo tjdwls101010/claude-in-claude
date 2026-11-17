@@ -1,0 +1,5 @@
+{
+ "exit": 1,
+ "stdout": "",
+ "stderr": "HTTP 404: workflow claude-none.yml not found on the default branch (https://api.github.com/repos/tjdwls101010/claude-schedule-probe/actions/workflows/claude-none.yml)\n"
+}

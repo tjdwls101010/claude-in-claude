@@ -1,0 +1,5 @@
+{
+ "exit": 1,
+ "stdout": "{\"message\":\"is at 4018a09a6e488339203c046da2dc4637f56703ca but expected 1812185b244310a882e122dc935830688f45e691\",\"documentation_url\":\"https://docs.github.com/rest/repos/contents#create-or-update-file-contents\",\"status\":\"409\"}",
+ "stderr": "gh: is at 4018a09a6e488339203c046da2dc4637f56703ca but expected 1812185b244310a882e122dc935830688f45e691 (HTTP 409)\n"
+}

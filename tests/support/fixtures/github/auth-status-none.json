@@ -1,0 +1,5 @@
+{
+ "exit": 0,
+ "stdout": "{\"hosts\":{}}\n",
+ "stderr": "You are not logged into any GitHub hosts. To log in, run: gh auth login\n"
+}
