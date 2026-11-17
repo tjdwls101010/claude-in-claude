@@ -119,6 +119,7 @@ def create_run(*, runs_dir, kind, prompt, settings, cwd, session_id=None, label=
     run_id, run_dir, meta = publish_run(runs_dir, session_id, label, check, make_meta)
     if on_published:
         on_published(meta)
+    time.sleep(timings()["pause_after_publish"])
     enqueue(run_dir, str(uuidlib.uuid4()), text, kind="prompt", head=prompt)
     pid = spawn_supervisor(run_dir)
     update_meta(run_dir, lambda m: (m.setdefault("supervisor_pid", pid), m.setdefault("supervisor_pgid", pid)))

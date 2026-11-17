@@ -132,6 +132,7 @@ def stop_one(run_dir):
         entry.update({"state": meta["state"], "note": "already ended"})
         return entry
     if meta.get("state") not in TERMINAL:
+        time.sleep(timings()["pause_before_stop_mark"])
         update_meta(run_dir, lambda m: m.update({"stop_requested": now()}) if m.get("state") not in TERMINAL else None)
     pgid, pid = meta.get("claude_pgid"), meta.get("claude_pid")
     command = process_command(pid) if pid else None

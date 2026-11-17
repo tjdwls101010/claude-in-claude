@@ -178,11 +178,13 @@ def supervise(run_dir):
     update_meta(run_dir, lambda m: m.update({"supervisor_pid": os.getpid(), "supervisor_pgid": os.getpgid(0)}))
     env = worker_env(dict(os.environ), meta["run_id"])
     stderr_file = open(Path(run_dir) / "stderr.log", "ab")
+    time.sleep(t["pause_before_launch"])
     try:
         proc = subprocess.Popen(meta["argv"], cwd=meta["launch_cwd"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr_file, env=env, start_new_session=True)
     except OSError as e:
         record_if_active(run_dir, {"state": "failed", "error": f"could not start claude: {e}", "ended_at": now(), "stdin_open": False})
         return 1
+    time.sleep(t["pause_before_pid"])
     update_meta(run_dir, lambda m: m.update({"claude_pid": proc.pid, "claude_pgid": proc.pid, "started_at": now()}))
     log(run_dir, f"claude pid {proc.pid}: {' '.join(meta['argv'][:3])} …")
     wt = meta.get("worktree")
