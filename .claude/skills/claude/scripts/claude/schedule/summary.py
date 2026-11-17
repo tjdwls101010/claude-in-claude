@@ -120,7 +120,7 @@ def _title(snapshot, context):
     return f"# {icon} {name} · {state}"
 
 
-def _trigger_text(context, started):
+def _trigger_text(context, started, verb="started"):
     trig = context.get("trigger") or {}
     kind = trig.get("kind")
     text = {"dispatcher": "dispatcher", "schedule": "schedule (backup)", "manual": "manual", "re-run": f"re-run (attempt {trig.get('attempt')})"}.get(kind, kind or "?")
@@ -133,7 +133,7 @@ def _trigger_text(context, started):
         parts.append(f"slot {_local(slot, tz, '%Y-%m-%d %H:%M')} {_zone(slot, tz)}")
     if started:
         same_day = slot is not None and _local(slot, tz, "%Y-%m-%d") == _local(started, tz, "%Y-%m-%d")
-        parts.append(f"started {_local(started, tz, '%H:%M:%S' if same_day else '%Y-%m-%d %H:%M:%S')}" + ("" if same_day else f" {_zone(started, tz)}"))
+        parts.append(f"{verb} {_local(started, tz, '%H:%M:%S' if same_day else '%Y-%m-%d %H:%M:%S')}" + ("" if same_day else f" {_zone(started, tz)}"))
     return " · ".join(parts)
 
 
@@ -162,7 +162,7 @@ def _run_text(snapshot):
     calls = sum((header.get("tool_calls") or {}).values())
     parts.append(f"{calls} tool call{'s' if calls != 1 else ''}")
     if isinstance(header.get("cost_usd"), (int, float)):
-        parts.append(f"${header['cost_usd']:.2f}")
+        parts.append(f"${header['cost_usd']:.2f}" if header["cost_usd"] >= 0.005 else "<$0.01")
     return " · ".join(parts)
 
 
@@ -208,7 +208,7 @@ def _alerts(snapshot, context):
             warning.append(f"**The worker started in `{mode}` mode, not `{EXPECTED_MODE.get(profile)}`** as the `{profile}` profile needs: treat what it could do as unknown.")
         exceptions = header.get("profile_exceptions") or []
         if exceptions:
-            warning.append(f"**{len(exceptions)} setting{'s' if len(exceptions) != 1 else ''} in your Claude Code files widen the `{(meta.get('settings') or {}).get('profile')}` profile:** " + "; ".join(f"`{e['setting']}` in `{e['file']}`" for e in exceptions[:5]))
+            warning.append(f"**{len(exceptions)} setting{'s' if len(exceptions) != 1 else ''} in your Claude Code files widen{'s' if len(exceptions) == 1 else ''} the `{(meta.get('settings') or {}).get('profile')}` profile:** " + "; ".join(f"`{e['setting']}` in `{e['file']}`" for e in exceptions[:5]))
         seen = context.get("attention") or []
         if seen:
             warning.append("**It needed attention while it ran**, which nobody could give: " + "; ".join(f"{a.get('reason')} at {a.get('at')}" for a in seen[:10]))
@@ -381,7 +381,8 @@ def _activity(snapshot, context, cuts):
         body += "\n\n" + "\n\n".join(below)
     if foot:
         body += "\n\n" + " · ".join(foot)
-    return _details(f"<b>Activity</b> · {sum(1 for r in table if r['kind'] not in ('result', 'retry', 'compact', 'task'))} tool calls", body)
+    calls = sum(1 for r in table if r["kind"] not in ("result", "retry", "compact", "task"))
+    return _details(f"<b>Activity</b> · {calls} tool call{'s' if calls != 1 else ''}", body)
 
 
 def _continue(snapshot, context):
@@ -410,7 +411,7 @@ def render_summary(snapshot, context):
     if snapshot:
         rows.append(("Run", _run_text(snapshot)))
     if context.get("trigger"):
-        rows.append(("Trigger", _trigger_text(context, started)))
+        rows.append(("Trigger", _trigger_text(context, started, "started" if snapshot else "at")))
     if context.get("tree"):
         rows.append(("Local tree", _tree_text(context["tree"])))
     outcome = context.get("outcome") or {}

@@ -122,6 +122,22 @@ class Rendered(unittest.TestCase):
         self.assertTrue(refused.startswith("# ❌ nightly-docs · not started\n"))
         self.assertIn("--worktree needs a commit", refused)
 
+    def test_counts_and_small_costs_read_right(self):
+        snap = self.run_dir()
+        snap["header"]["tool_calls"] = {"Bash": 1}
+        snap["header"]["cost_usd"] = 0.0031
+        snap["header"]["profile_exceptions"] = [{"setting": "permissions.allow WebFetch(domain:…)", "file": "/h/.claude/settings.json", "value": ["github.com"], "effect": "x"}]
+        snap["rows"] = [r for r in snap["rows"] if r["kind"] != "bash" or r["detail"].startswith("ls")]
+        snap["rows"] = [r for r in snap["rows"] if r["kind"] in ("bash", "result", "init", "ratelimit", "msg")]
+        text = schedule.render_summary(snap, self.context())
+        self.assertIn("· 1 tool call · <$0.01 |", text)
+        self.assertIn("<b>Activity</b> · 1 tool call</summary>", text)
+        self.assertIn("**1 setting in your Claude Code files widens the `write` profile:**", text)
+
+    def test_a_job_without_a_worker_says_when_it_ran_not_started(self):
+        text = schedule.render_summary(None, self.context(outcome={"kind": "skipped", "reason": "this slot already ran", "previous": {}}, at=STARTED))
+        self.assertIn("| **Trigger** | dispatcher · slot 2026-11-17 11:54 KST · at 11:54:43 |", text)
+
     def test_limits_cut_the_answer_and_the_prompt(self):
         big = "x" * 500_000
         text = schedule.render_summary(self.run_dir(), self.context(prompt=big))
