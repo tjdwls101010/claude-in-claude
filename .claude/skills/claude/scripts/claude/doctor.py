@@ -7,9 +7,11 @@ import sys
 from pathlib import Path
 
 from claude.claude_cli import VERIFIED_VERSION, VERSION_FLOOR, VERSION_FLOOR_TEXT, auth_status, claude_version, profile_exceptions, quota, sandbox_prereqs, worker_env
-from claude.git import main_checkout, toplevel, worktree_entries
+from claude.git import main_checkout, remote_url, toplevel, worktree_entries
+from claude.github import GitHubError, gh_status, local_runners, repo_facts, repo_from_remote, runner_problems, runners
+from claude.launchd import supported as launchd_supported
 from claude.registry import list_groups, live_runs, resolve_runs_dir
-from claude.util import entry_path, invocation, skill_dir
+from claude.util import entry_path, invocation, skill_dir, timings
 
 
 def _text(v):
@@ -73,6 +75,8 @@ def doctor(*, cwd, runs_dir=None):
         for item in items:
             if item["setting"] in ("sandbox.excludedCommands", "sandbox.enabled", "unreadable settings file"):
                 warnings.append(f"{p}: {item['setting']} in {item['file']} — {item['effect']}")
+    sched, sched_warnings = schedule_readiness_within(cwd, timings()["doctor_gh_wait"])
+    warnings += sched_warnings
     return {
         "ok": not blockers,
         "blockers": blockers,
@@ -87,4 +91,70 @@ def doctor(*, cwd, runs_dir=None):
         "invocation": invocation("<command>"),
         "registry": reg,
         "profile_exceptions": exceptions,
+        "schedule": sched,
     }
+
+
+def schedule_readiness_within(cwd, seconds):
+    """schedule_readiness, given up after `seconds` or on a gh that cannot run: what scheduling needs must not hold up or break the diagnosis of ordinary runs."""
+    import threading
+
+    box = {}
+
+    def work():
+        try:
+            box["result"] = schedule_readiness(cwd)
+        except GitHubError as e:
+            box["result"] = ({"platform_ok": launchd_supported(), "gh": {"error": e.message}, "repo": None, "runners": None}, [f"schedules need gh, which failed: {e.message}"])
+        except Exception as e:  # a check that is only advice must not break doctor or pass for a timeout
+            box["result"] = ({"platform_ok": launchd_supported(), "gh": None, "repo": None, "runners": None, "error": f"{type(e).__name__}: {e}"}, [f"whether this project can be scheduled could not be checked: {type(e).__name__}: {e}"])
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(seconds)
+    if "result" not in box:
+        return {"platform_ok": launchd_supported(), "gh": {"error": f"no answer within {seconds:g} s"}, "repo": None, "runners": None}, [f"gh did not answer within {seconds:g} s, so whether this project can be scheduled is unknown"]
+    return box["result"]
+
+
+def schedule_readiness(cwd):
+    """What `schedule` would need from here, read without changing anything (K13): this platform, gh, the project's GitHub repository, and its runners — GitHub's list and this Mac's services, with the same `problems` a `schedule` reply carries. A doctor in a conversation runs in the login session and cannot see what the runner's service sees; only a check run proves that. Nothing here is a blocker, since ordinary runs do not need it."""
+    warnings = []
+    platform_ok = launchd_supported()
+    if not platform_ok:
+        warnings.append("schedules need launchd, so macOS")
+    gh = gh_status()
+    out = {"platform_ok": platform_ok, "gh": {"path": gh["path"], "logged_in": gh["logged_in"], "workflow_scope": "workflow" in gh["scopes"]}, "repo": None, "runners": None}
+    if gh["error"]:
+        warnings.append(f"schedules need gh: {gh['error']}")
+        return out, warnings
+    if "workflow" not in gh["scopes"]:
+        warnings.append("gh's token lacks the `workflow` scope that committing a schedule needs; `gh auth refresh -s workflow`")
+    top = toplevel(cwd)
+    project = (main_checkout(cwd) or top) if top else None
+    repo = repo_from_remote(remote_url(project)) if project else None
+    if not repo:
+        out["repo"] = {"error": "not a git checkout with a GitHub remote named origin"}
+        warnings.append("schedules need a git checkout with a GitHub remote named origin")
+        return out, warnings
+    try:
+        facts = repo_facts(repo)
+    except GitHubError as e:
+        out["repo"] = {"name": repo, "error": e.message}
+        warnings.append(f"gh cannot see {repo}: {e.message}")
+        return out, warnings
+    repo = facts["full_name"] or repo  # GitHub's spelling, as `schedule` uses it
+    out["repo"] = {"name": repo, "private": facts["private"], "default_branch": facts["default_branch"]}
+    if not facts["private"]:
+        warnings.append(f"{repo} is public: `schedule` refuses it unless --public-ok")
+    try:
+        registered = runners(repo)
+    except GitHubError as e:
+        out["runners"] = {"error": e.message}
+        warnings.append(f"the runners of {repo} could not be listed: {e.message}")
+        return out, warnings
+    local = local_runners(repo)
+    problems = runner_problems(registered, local)
+    out["runners"] = {"registered": registered, "local": local, "problems": problems}
+    warnings += [f"schedule runner: {p['problem']} — {p['why']}" for p in problems]
+    return out, warnings

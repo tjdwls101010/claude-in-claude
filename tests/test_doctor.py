@@ -96,3 +96,107 @@ class LimitsInLogs(Sandbox):
         self.assertIn("retry attempt=2/10 error=overloaded status=529", lines)
         self.assertEqual([l for l in lines if l.startswith("ratelimit ")], ["ratelimit allowed 5h=2% 7d=42%", "ratelimit allowed_warning 5h=2% 7d=42%"])
         self.assertEqual(self.status(reply["run_id"])["rate_limit"]["status"], "allowed_warning")
+
+
+class ScheduleReadiness(Sandbox):
+    """doctor's `schedule` section, with the fake gh's simulated repository and a runner service under the private HOME: no runner, a runner whose service runs in its own security session, and a ready one. Never a blocker."""
+
+    def setUp(self):
+        super().setUp()
+        import os
+        import plistlib
+
+        self.plistlib = plistlib
+        git(self.project, "remote", "add", "origin", "https://github.com/someone/project.git")
+        (self.root / "fake-gh").mkdir(exist_ok=True)
+        self.world = self.root / "fake-gh" / "world.json"
+        self.world.write_text(json.dumps({"auth": "ok", "repos": {"someone/project": {"private": True, "default_branch": "main", "runners": []}}}))
+        self.bin = self.root / "runner-bin"
+        self.bin.mkdir()
+        for tool in ("uv", "claude"):
+            (self.bin / tool).write_text("#!/bin/sh\n")
+            os.chmod(self.bin / tool, 0o755)
+
+    def runner(self, session_create, status="online"):
+        w = json.loads(self.world.read_text())
+        w["repos"]["someone/project"]["runners"] = [{"name": "mac", "status": status}]
+        self.world.write_text(json.dumps(w))
+        rdir = self.root / "actions-runner"
+        rdir.mkdir(exist_ok=True)
+        (rdir / ".path").write_text(f"{self.bin}:/usr/bin:/bin")
+        agents = self.home / "Library" / "LaunchAgents"
+        agents.mkdir(parents=True, exist_ok=True)
+        plist = {"Label": "actions.runner.someone-project.mac", "WorkingDirectory": str(rdir)}
+        if session_create:
+            plist["SessionCreate"] = True
+        (agents / "actions.runner.someone-project.mac.plist").write_bytes(self.plistlib.dumps(plist))
+
+    def schedule(self):
+        d = self.cli_json("doctor", timeout=120)
+        self.assertTrue(d["ok"], "scheduling readiness is never a blocker")
+        return d, d["schedule"]
+
+    def test_no_runner(self):
+        d, s = self.schedule()
+        self.assertEqual((s["platform_ok"], s["gh"]["logged_in"], s["gh"]["workflow_scope"]), (True, True, True))
+        self.assertEqual(s["repo"], {"name": "someone/project", "private": True, "default_branch": "main"})
+        self.assertEqual([p["problem"] for p in s["runners"]["problems"]], ["none"])
+        self.assertTrue(any(w.startswith("schedule runner: none") for w in d["warnings"]))
+
+    def test_a_service_in_its_own_session(self):
+        self.runner(session_create=True)
+        d, s = self.schedule()
+        self.assertEqual([p["problem"] for p in s["runners"]["problems"]], ["session_create"])
+        self.assertEqual(s["runners"]["local"][0]["path_has"], {"uv": True, "claude": True, "gh": False})
+
+    def test_a_runner_env_that_is_not_utf8(self):
+        self.runner(session_create=True)
+        (self.root / "actions-runner" / ".env").write_bytes(b"LANG=\xff\xfe\nCLAUDE_CODE_OAUTH_TOKEN=x\n")
+        d, s = self.schedule()
+        self.assertEqual(s["runners"]["problems"], [], "the token line is still read")
+        self.assertFalse(any("did not answer" in w for w in d["warnings"]))
+
+    def test_a_ready_runner(self):
+        self.runner(session_create=False)
+        d, s = self.schedule()
+        self.assertEqual(s["runners"]["problems"], [])
+        self.assertFalse(any(w.startswith("schedule") for w in d["warnings"]))
+
+    def test_the_repository_as_github_spells_it(self):
+        self.runner(session_create=False)
+        git(self.project, "remote", "set-url", "origin", "https://github.com/Someone/Project.git")
+        d, s = self.schedule()
+        self.assertEqual(s["repo"]["name"], "someone/project")
+        self.assertEqual(s["runners"]["problems"], [], "the same judgement schedule makes")
+
+    def test_a_gh_that_cannot_run_or_answers_slowly_is_a_warning(self):
+        import os
+
+        bad = self.root / "bad-bin"
+        bad.mkdir()
+        (bad / "gh").write_text("not a program\n")
+        os.chmod(bad / "gh", 0o755)
+        d = self.cli_json("doctor", timeout=120, env={"PATH": f"{bad}{os.pathsep}{self.env['PATH']}"})
+        self.assertTrue(d["ok"])
+        self.assertTrue(any("gh" in w for w in d["warnings"]), d["warnings"])
+        w = json.loads(self.world.read_text())
+        w["slow"] = 30
+        self.world.write_text(json.dumps(w))
+        import time
+
+        began = time.time()
+        d = self.cli_json("doctor", timeout=120, env={"CLAUDE_SKILL_TEST_TIMINGS": json.dumps({"doctor_gh_wait": 2})})
+        self.assertLess(time.time() - began, 25, "doctor does not wait out a slow gh")
+        self.assertTrue(any("did not answer" in x for x in d["warnings"]), d["warnings"])
+
+    def test_no_github_remote_and_no_gh_login(self):
+        git(self.project, "remote", "remove", "origin")
+        d, s = self.schedule()
+        self.assertIn("error", s["repo"])
+        self.assertTrue(any("GitHub remote" in x for x in d["warnings"]), d["warnings"])
+        w = json.loads(self.world.read_text())
+        w["auth"] = "none"
+        self.world.write_text(json.dumps(w))
+        d, s = self.schedule()
+        self.assertFalse(s["gh"]["logged_in"])
+        self.assertTrue(any("gh auth login" in x for x in d["warnings"]))

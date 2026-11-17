@@ -21,6 +21,7 @@ TIMINGS = {
     "retry_attention": 120.0,  # API retries this long is attention
     "finishing_attention": 120.0,  # a process alive this long after stdin closed is attention
     "poll": 0.2,
+    "doctor_gh_wait": 20.0,  # how long doctor waits for gh's answers about scheduling before it reports them missing
     # Test seams, 0 in production: pauses at the three points a stop can land in while a run starts — after the run is published, before the supervisor launches claude, and between launching claude and recording its pid — and in `stop` between reading the run and marking it stopped.
     "pause_after_publish": 0.0,
     "pause_before_launch": 0.0,
