@@ -125,6 +125,16 @@ class StopWhileStarting(Sandbox):
         self.assertEqual((entry["state"], meta["state"], meta["error"]), ("interrupted", "interrupted", "stopped"))
         self.assert_nothing_ran(meta)
 
+    def test_stop_that_outwaits_a_slow_supervisor(self):
+        # stop waits a few seconds for the supervisor, then records the outcome itself: that record must name the undelivered prompt too.
+        env = {**self.env, "CLAUDE_SKILL_TEST_TIMINGS": json.dumps({**FAST_TIMINGS, "pause_before_launch": 10})}
+        proc = subprocess.Popen([sys.executable, str(ENTRY), "start", self.PROMPT], cwd=self.project, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        self.wait_for(lambda: (m := self.meta()) and (self.run_dir(m["run_id"]) / "stderr.log").exists(), what="the supervisor to reach the launch")
+        entry, meta = self.stop_and_settle(proc)
+        self.assertEqual((entry["state"], meta["state"]), ("interrupted", "interrupted"))
+        self.assert_nothing_ran(meta)
+
     def test_stop_before_pid_is_recorded(self):
         proc = self.start_paused("pause_before_pid")
         self.wait_for(self.supervisor_child, what="claude's process to be started")

@@ -174,8 +174,8 @@ def outcome(meta, run_dir, returncode):
 GATE = 'read -r go <&"$0" && [ "$go" = go ] && exec "$@"; exit 125'
 
 
-def stop_unlaunched(m):
-    """Record a run that was stopped before claude ran: interrupted, with every message still undelivered."""
+def record_stopped(m):
+    """Record a stop that no claude process reported: interrupted, with every message that was never delivered — all of them when claude never ran."""
     if m.get("state") not in TERMINAL:
         m.update({"state": "interrupted", "error": "stopped", "ended_at": now(), "stdin_open": False, "undelivered": [x["uuid"] for x in m.get("messages") or [] if x.get("after_line") is None]})
 
@@ -190,7 +190,7 @@ def supervise(run_dir):
     stderr_file = open(Path(run_dir) / "stderr.log", "ab")
     time.sleep(t["pause_before_launch"])
     # `stop` can signal claude only once its pid is recorded, so a stop that lands before that is honoured here (K25): before launching, and when the pid is recorded — under the run's lock, as `stop` sets its request and reads the pid under it, so whichever comes second sees the other.
-    if update_meta(run_dir, lambda m: m.get("stop_requested") and stop_unlaunched(m)).get("state") in TERMINAL:
+    if update_meta(run_dir, lambda m: m.get("stop_requested") and record_stopped(m)).get("state") in TERMINAL:
         log(run_dir, "stopped before claude was launched")
         stderr_file.close()
         return 0
@@ -208,7 +208,7 @@ def supervise(run_dir):
     def record_pid(m):
         m.update({"claude_pid": proc.pid, "claude_pgid": proc.pid, "started_at": now()})
         if m.get("stop_requested"):
-            stop_unlaunched(m)
+            record_stopped(m)
 
     recorded = update_meta(run_dir, record_pid)
     if recorded.get("state") in TERMINAL:
