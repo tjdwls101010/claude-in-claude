@@ -26,6 +26,9 @@ ENTRY = Path(os.environ.get("CLAUDE_SKILL_TEST_ENTRY") or SKILL_DIR / "scripts" 
 SCRIPTS = ENTRY.parent
 SUPPORT = Path(__file__).resolve().parent
 FAKE_DIR = SUPPORT / "fake_claude"
+# The fake gh and launchctl are first on PATH in every test too, so nothing in the default suite reaches GitHub or launchd.
+FAKE_GH_DIR = SUPPORT / "fake_gh"
+FAKE_LAUNCHCTL_DIR = SUPPORT / "fake_launchctl"
 FIXTURES = SUPPORT / "fixtures"
 
 TERMINAL = ("completed", "failed", "interrupted", "timed_out", "orphaned")
@@ -147,7 +150,10 @@ class Sandbox(unittest.TestCase):
         else:
             self.project.mkdir()
         self.env = {
-            "PATH": f"{FAKE_DIR}{os.pathsep}{os.environ.get('PATH', '')}",
+            "PATH": os.pathsep.join([str(FAKE_DIR), str(FAKE_GH_DIR), str(FAKE_LAUNCHCTL_DIR), os.environ.get("PATH", "")]),
+            "FAKE_GH_STATE": str(self.root / "fake-gh"),
+            "FAKE_GH_FIXTURES": str(FIXTURES / "github"),
+            "FAKE_LAUNCHCTL_STATE": str(self.root / "fake-launchctl"),
             "HOME": str(self.home),
             "FAKE_CLAUDE_STATE": str(self.state),
             "FAKE_CLAUDE_VERSION": self.fake_version,
