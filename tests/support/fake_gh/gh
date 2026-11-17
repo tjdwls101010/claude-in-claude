@@ -6,6 +6,7 @@ world.json: {"auth": "ok" | "none" | "noscope", "repos": {"owner/name": {"privat
   race: the next n Contents PUTs first lose to another `schedule` call, which commits the file as it was (or, for a first create, what this call sends) under another definition id — and with `race_cron`, another cron — and get the 409 a real loser got (stage 0 f).
   protected: a Contents PUT or DELETE gets the 409 a protected branch answered (captured).
   offline: a Contents PUT fails as gh does without a network: a message on stderr, no HTTP status.
+  slow: every call first sleeps this many seconds.
 """
 
 import base64
@@ -73,6 +74,8 @@ def commit_sha():
 
 
 args = sys.argv[1:]
+if world.get("slow"):
+    time.sleep(float(world["slow"]))
 if args[:2] == ["auth", "status"]:
     mode = world.get("auth", "ok")
     if mode == "none":

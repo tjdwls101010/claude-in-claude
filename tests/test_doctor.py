@@ -155,10 +155,38 @@ class ScheduleReadiness(Sandbox):
         self.assertEqual(s["runners"]["problems"], [])
         self.assertFalse(any(w.startswith("schedule") for w in d["warnings"]))
 
+    def test_the_repository_as_github_spells_it(self):
+        self.runner(session_create=False)
+        git(self.project, "remote", "set-url", "origin", "https://github.com/Someone/Project.git")
+        d, s = self.schedule()
+        self.assertEqual(s["repo"]["name"], "someone/project")
+        self.assertEqual(s["runners"]["problems"], [], "the same judgement schedule makes")
+
+    def test_a_gh_that_cannot_run_or_answers_slowly_is_a_warning(self):
+        import os
+
+        bad = self.root / "bad-bin"
+        bad.mkdir()
+        (bad / "gh").write_text("not a program\n")
+        os.chmod(bad / "gh", 0o755)
+        d = self.cli_json("doctor", timeout=120, env={"PATH": f"{bad}{os.pathsep}{self.env['PATH']}"})
+        self.assertTrue(d["ok"])
+        self.assertTrue(any("gh" in w for w in d["warnings"]), d["warnings"])
+        w = json.loads(self.world.read_text())
+        w["slow"] = 30
+        self.world.write_text(json.dumps(w))
+        import time
+
+        began = time.time()
+        d = self.cli_json("doctor", timeout=120, env={"CLAUDE_SKILL_TEST_TIMINGS": json.dumps({"doctor_gh_wait": 2})})
+        self.assertLess(time.time() - began, 25, "doctor does not wait out a slow gh")
+        self.assertTrue(any("did not answer" in x for x in d["warnings"]), d["warnings"])
+
     def test_no_github_remote_and_no_gh_login(self):
         git(self.project, "remote", "remove", "origin")
         d, s = self.schedule()
         self.assertIn("error", s["repo"])
+        self.assertTrue(any("GitHub remote" in x for x in d["warnings"]), d["warnings"])
         w = json.loads(self.world.read_text())
         w["auth"] = "none"
         self.world.write_text(json.dumps(w))

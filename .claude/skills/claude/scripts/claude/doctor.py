@@ -11,7 +11,7 @@ from claude.git import main_checkout, remote_url, toplevel, worktree_entries
 from claude.github import GitHubError, gh_status, local_runners, repo_facts, repo_from_remote, runner_problems, runners
 from claude.launchd import supported as launchd_supported
 from claude.registry import list_groups, live_runs, resolve_runs_dir
-from claude.util import entry_path, invocation, skill_dir
+from claude.util import entry_path, invocation, skill_dir, timings
 
 
 def _text(v):
@@ -75,7 +75,7 @@ def doctor(*, cwd, runs_dir=None):
         for item in items:
             if item["setting"] in ("sandbox.excludedCommands", "sandbox.enabled", "unreadable settings file"):
                 warnings.append(f"{p}: {item['setting']} in {item['file']} — {item['effect']}")
-    sched, sched_warnings = schedule_readiness(cwd)
+    sched, sched_warnings = schedule_readiness_within(cwd, timings()["doctor_gh_wait"])
     warnings += sched_warnings
     return {
         "ok": not blockers,
@@ -93,6 +93,26 @@ def doctor(*, cwd, runs_dir=None):
         "profile_exceptions": exceptions,
         "schedule": sched,
     }
+
+
+def schedule_readiness_within(cwd, seconds):
+    """schedule_readiness, given up after `seconds` or on a gh that cannot run: what scheduling needs must not hold up or break the diagnosis of ordinary runs."""
+    import threading
+
+    box = {}
+
+    def work():
+        try:
+            box["result"] = schedule_readiness(cwd)
+        except GitHubError as e:
+            box["result"] = ({"platform_ok": launchd_supported(), "gh": {"error": e.message}, "repo": None, "runners": None}, [f"schedules need gh, which failed: {e.message}"])
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(seconds)
+    if "result" not in box:
+        return {"platform_ok": launchd_supported(), "gh": {"error": f"no answer within {seconds:g} s"}, "repo": None, "runners": None}, [f"gh did not answer within {seconds:g} s, so whether this project can be scheduled is unknown"]
+    return box["result"]
 
 
 def schedule_readiness(cwd):
@@ -113,6 +133,7 @@ def schedule_readiness(cwd):
     repo = repo_from_remote(remote_url(project)) if project else None
     if not repo:
         out["repo"] = {"error": "not a git checkout with a GitHub remote named origin"}
+        warnings.append("schedules need a git checkout with a GitHub remote named origin")
         return out, warnings
     try:
         facts = repo_facts(repo)
@@ -120,6 +141,7 @@ def schedule_readiness(cwd):
         out["repo"] = {"name": repo, "error": e.message}
         warnings.append(f"gh cannot see {repo}: {e.message}")
         return out, warnings
+    repo = facts["full_name"] or repo  # GitHub's spelling, as `schedule` uses it
     out["repo"] = {"name": repo, "private": facts["private"], "default_branch": facts["default_branch"]}
     if not facts["private"]:
         warnings.append(f"{repo} is public: `schedule` refuses it unless --public-ok")
@@ -127,6 +149,7 @@ def schedule_readiness(cwd):
         registered = runners(repo)
     except GitHubError as e:
         out["runners"] = {"error": e.message}
+        warnings.append(f"the runners of {repo} could not be listed: {e.message}")
         return out, warnings
     local = local_runners(repo)
     problems = runner_problems(registered, local)
