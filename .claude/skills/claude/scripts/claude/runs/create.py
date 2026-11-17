@@ -72,8 +72,8 @@ def concurrent_writers(runs_dir, cwd, run_id):
     return out
 
 
-def create_run(*, runs_dir, kind, prompt, settings, cwd, session_id=None, label=None, timeout=None, previous=None, group=None, worktree=None, expect_cwd=None, launch_cwd=None, group_info=None, worktree_info=None, extra_meta=None, precheck=None, on_published=None):
-    """Publish and start one run. `kind` is `start` (a new session) or `resume` (`session_id` given). Returns the run's meta after the init wait."""
+def create_run(*, runs_dir, kind, prompt, settings, cwd, session_id=None, label=None, timeout=None, previous=None, group=None, worktree=None, expect_cwd=None, launch_cwd=None, group_info=None, worktree_info=None, extra_meta=None, precheck=None, on_published=None, origin=None):
+    """Publish and start one run. `kind` is `start` (a new session) or `resume` (`session_id` given). `origin` says what started it when that was not a caller in a conversation (a schedule's job), and is in the meta from the moment the run is published. Returns the run's meta after the init wait."""
     refuse_inside_worker()
     problem = version_floor_check()
     if problem:
@@ -81,7 +81,7 @@ def create_run(*, runs_dir, kind, prompt, settings, cwd, session_id=None, label=
     session_id = session_id or str(uuidlib.uuid4())
     launch_cwd = launch_cwd or cwd
     # Facts that can change from turn to turn (the profile, a group, a worktree) go in front of the prompt, not into the system prompt, which a resumed session keeps as first recorded.
-    preamble = turn_preamble(settings["profile"], group=group_info, worktree=worktree_info)
+    preamble = turn_preamble(settings["profile"], group=group_info, worktree=worktree_info, origin=origin)
     text = f"{preamble}\n\n{prompt}" if preamble else prompt
     argv = build_argv(settings, session_id=session_id, resume=kind == "resume", cwd=cwd, worktree=worktree, schema_text=settings.get("schema_text"))
     roots = [r for r in {toplevel(cwd), main_checkout(cwd)} if r]
@@ -106,6 +106,8 @@ def create_run(*, runs_dir, kind, prompt, settings, cwd, session_id=None, label=
             "caller_session_id": os.environ.get("CLAUDE_CODE_SESSION_ID"),
             "profile_exceptions": profile_exceptions(cwd, settings["profile"], project_roots=roots),
         }
+        if origin:
+            meta["origin"] = origin
         meta.update(extra_meta or {})
         return meta
 

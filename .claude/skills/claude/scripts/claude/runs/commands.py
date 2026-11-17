@@ -17,13 +17,13 @@ from .settings import settings_for
 from .supervisor import record_stopped, signal_ladder
 
 
-def start(*, prompt, cwd, flags, label=None, timeout=None, runs_dir=None):
-    """Start a fresh worker session on `prompt`. `cwd` is where the command was run; `flags` holds profile, model, effort, schema and an explicit run directory (`cwd` key) when given."""
+def start(*, prompt, cwd, flags, label=None, timeout=None, runs_dir=None, origin=None):
+    """Start a fresh worker session on `prompt`. `cwd` is where the command was run; `flags` holds profile, model, effort, schema and an explicit run directory (`cwd` key) when given; `origin` is recorded in the run's meta (see `create_run`)."""
     settings = settings_for(flags)
     run_cwd = flags.get("cwd") or default_cwd(cwd)
     # The registry belongs to the project the command runs in, so `status` there finds the run whatever --cwd says.
     registry = resolve_runs_dir(cwd, runs_dir)
-    meta = create_run(runs_dir=registry, kind="start", prompt=prompt, settings=settings, cwd=run_cwd, label=label, timeout=timeout)
+    meta = create_run(runs_dir=registry, kind="start", prompt=prompt, settings=settings, cwd=run_cwd, label=label, timeout=timeout, origin=origin)
     return start_reply(meta, registry)
 
 

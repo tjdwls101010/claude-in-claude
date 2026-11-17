@@ -39,7 +39,7 @@ def plan_members(group, tasks, defaults, caller_cwd, use_worktrees):
     return plans, {"repo": repo, "head": head, "uncommitted": uncommitted_count(repo) if repo else None}
 
 
-def start_member(runs_dir, group, size, plan, defaults, caller_cwd, facts):
+def start_member(runs_dir, group, size, plan, defaults, caller_cwd, facts, origin=None):
     """Start one member; returns its manifest entry and its reply row. A member that fails to start keeps its slot with an `error`."""
     entry = {"index": plan["index"], "label": plan["label"], "kind": plan["kind"], "run_id": None, "session_id": None, "worktree": plan["worktree"], "error": None}
     group_info = {"name": group, "index": plan["index"], "size": size}
@@ -54,7 +54,7 @@ def start_member(runs_dir, group, size, plan, defaults, caller_cwd, facts):
             meta = create_run(
                 runs_dir=runs_dir, kind="start", prompt=task["prompt"], settings=plan["settings"], cwd=wt["repo"] if wt else plan["cwd"], launch_cwd=wt["repo"] if wt else None,
                 label=plan["label"] or group, timeout=defaults.get("timeout"), group=group, worktree=wt["name"] if wt else None,
-                group_info=group_info, worktree_info=wt_info, extra_meta={"worktree": wt, "group_index": plan["index"]} if wt else {"group_index": plan["index"]}, on_published=published,
+                group_info=group_info, worktree_info=wt_info, extra_meta={"worktree": wt, "group_index": plan["index"]} if wt else {"group_index": plan["index"]}, on_published=published, origin=origin,
             )
             reply = start_reply(meta, runs_dir)
         else:
@@ -67,8 +67,8 @@ def start_member(runs_dir, group, size, plan, defaults, caller_cwd, facts):
     return entry, row
 
 
-def start_members(runs_dir, group, plans, defaults, caller_cwd, facts):
+def start_members(runs_dir, group, plans, defaults, caller_cwd, facts, origin=None):
     """Start every member at once, so N members cost one init wait, not N."""
     with ThreadPoolExecutor(max_workers=min(8, len(plans))) as pool:
-        futures = [pool.submit(start_member, runs_dir, group, len(plans), p, defaults, caller_cwd, facts) for p in plans]
+        futures = [pool.submit(start_member, runs_dir, group, len(plans), p, defaults, caller_cwd, facts, origin) for p in plans]
         return [f.result() for f in futures]

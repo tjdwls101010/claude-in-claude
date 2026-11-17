@@ -239,6 +239,20 @@ class TurnPreamble(unittest.TestCase):
         self.assertIn("abc123", text)
         self.assertIn("4 uncommitted", text)
 
+    def test_a_group_of_one_has_no_others(self):
+        text = cli.turn_preamble("write", group={"name": "nightly-1-1", "index": 1, "size": 1}, worktree={"path": "/r/.claude/worktrees/nightly-1-1-1", "base": "abc123", "uncommitted": 0})
+        self.assertNotIn("in parallel", text)
+        self.assertNotIn("member 1 of 1", text)
+        self.assertIn("/r/.claude/worktrees/nightly-1-1-1", text)
+
+    def test_a_scheduled_run_is_told_nobody_watches_and_where_its_answer_goes(self):
+        origin = {"kind": "schedule", "name": "nightly-review", "trigger": "dispatcher", "when": "2026-11-17 03:00 KST", "repository": "someone/project", "job": "1-1", "slot": 1794852000, "url": "https://github.com/someone/project/actions/runs/1"}
+        text = cli.turn_preamble("read-only", origin=origin)
+        self.assertIn("scheduled run of nightly-review", text)
+        self.assertIn("2026-11-17 03:00 KST", text)
+        self.assertIn("nobody is watching", text.lower())
+        self.assertIn("GitHub Actions run summary in someone/project", text)
+
 
 class WorktreeLocation(unittest.TestCase):
     def test_claude_code_naming(self):

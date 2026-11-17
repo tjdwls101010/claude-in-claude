@@ -14,8 +14,8 @@ from .spawn import plan_members, start_members
 from .tasks import parse_tasks
 
 
-def batch(*, name, task_args, tasks_file, defaults, cwd, use_worktrees=False, runs_dir=None):
-    """Start every task as a member of group `name`. The name stays reserved until `clean` releases it."""
+def batch(*, name, task_args, tasks_file, defaults, cwd, use_worktrees=False, runs_dir=None, origin=None):
+    """Start every task as a member of group `name`. The name stays reserved until `clean` releases it. `origin` goes into the group's manifest and each fresh member's meta."""
     refuse_inside_worker()
     if not valid_group_name(name):
         raise Refusal(f"group name {name!r}: lowercase letters, digits and hyphens, starting with a letter or digit, at most 40", arguments=True, help="batch --help")
@@ -24,8 +24,11 @@ def batch(*, name, task_args, tasks_file, defaults, cwd, use_worktrees=False, ru
     plans, facts = plan_members(name, tasks, defaults, cwd, use_worktrees)
     # Every slot is in the manifest before anything starts and each gets its run as soon as that run exists, so an interrupted batch leaves its live members where stop --group and clean find them.
     slots = [{"index": p["index"], "label": p["label"], "kind": p["kind"], "run_id": None, "session_id": None, "worktree": p["worktree"], "error": None} for p in plans]
-    claim_group(registry, name, {"size": len(plans), "worktree": use_worktrees, "base": facts["head"], "repo": facts["repo"], "members": slots, "spawning_pid": os.getpid()})
-    results = start_members(registry, name, plans, defaults, cwd, facts)
+    fields = {"size": len(plans), "worktree": use_worktrees, "base": facts["head"], "repo": facts["repo"], "members": slots, "spawning_pid": os.getpid()}
+    if origin:
+        fields["origin"] = origin
+    claim_group(registry, name, fields)
+    results = start_members(registry, name, plans, defaults, cwd, facts, origin=origin)
     record_members(registry, name, [entry for entry, _ in results])
     rows = [row for _, row in results]
     spawned = sum(1 for r in rows if r.get("run_id"))

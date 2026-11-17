@@ -34,10 +34,12 @@ WORKER_CONTEXT = (
 )
 
 
-def turn_preamble(profile, *, group=None, worktree=None):
-    """What this turn's prompt is prefixed with: the group a batch member belongs to and a worktree member's checkout. None when there is nothing to say."""
+def turn_preamble(profile, *, group=None, worktree=None, origin=None):
+    """What this turn's prompt is prefixed with: that it is a scheduled run nobody watches (K11), the group a batch member belongs to when it has others, and a worktree member's checkout. None when there is nothing to say."""
     lines = []
-    if group:
+    if origin and origin.get("kind") == "schedule":
+        lines.append(f"[This is a scheduled run of {origin['name']} ({origin.get('trigger')}, {origin.get('when')}). Nobody is watching it and nobody can answer it; your final message is published as the GitHub Actions run summary in {origin.get('repository')}, so write it for a reader who sees only that message and the prompt.]")
+    if group and group.get("size", 0) > 1:
         lines.append(f"[You are member {group['index']} of {group['size']} in group {group['name']}, started together on related tasks; the others work in parallel and you will not see their work.]")
     if worktree:
         lines.append(f"[You are working in a git worktree at {worktree['path']}, not the caller's checkout. It was created from commit {worktree['base']}; the caller's tree has {worktree['uncommitted']} uncommitted file(s) that are not here.]")
