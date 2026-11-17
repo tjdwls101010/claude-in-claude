@@ -13,6 +13,7 @@ from claude.util import trim_bytes
 ANSWER_BYTES = 400_000
 PROMPT_BYTES = 50_000
 ACTIVITY_ROWS = 300
+CHANGE_ROWS = 500
 EXCERPTS_BYTES = 100_000
 TOTAL_BYTES = 900_000
 DETAIL_CHARS = 100
@@ -146,14 +147,14 @@ def _tree_text(tree):
     tree = tree or {}
     kind = tree.get("kind")
     if kind == "worktree":
-        return f"worktree {_code(tree['path'])} on {_code(tree.get('branch') or '?')} from {_code((tree.get('base') or '')[:7])}, a clean checkout of that commit; your checkout is not touched"
+        return f"worktree {_code(tree['path'], True)} on {_code(tree.get('branch') or '?', True)} from {_code((tree.get('base') or '')[:7], True)}, a clean checkout of that commit; your checkout is not touched"
     if kind == "checkout":
-        where = f"{_code(tree['branch'])}" if tree.get("branch") else "detached HEAD"
+        where = f"{_code(tree['branch'], True)}" if tree.get("branch") else "detached HEAD"
         n = tree.get("uncommitted_before")
         state = "clean when the run began" if not n else f"{n} uncommitted file{'s' if n != 1 else ''} when the run began"
-        return f"{where} @ {_code((tree.get('head') or '')[:7])}, {state} (not the commit GitHub shows for this run)"
+        return f"{where} @ {_code((tree.get('head') or '')[:7], True)}, {state} (not the commit GitHub shows for this run)"
     if kind == "none":
-        return f"{_code(tree.get('path') or '?')}, not a git checkout"
+        return f"{_code(tree.get('path') or '?', True)}, not a git checkout"
     return "unknown"
 
 
@@ -161,7 +162,7 @@ def _run_text(snapshot):
     meta, header = snapshot["meta"], snapshot["header"]
     settings = meta.get("settings") or {}
     init = meta.get("init") or {}
-    parts = [_code(settings.get("profile") or "?"), f"{init.get('model') or settings.get('model')} / {settings.get('effort')}"]
+    parts = [_code(settings.get("profile") or "?", True), _cell(f"{init.get('model') or settings.get('model')} / {settings.get('effort')}")]
     if meta.get("started_at") and meta.get("ended_at"):
         parts.append(_duration(meta["ended_at"] - meta["started_at"]))
     calls = sum((header.get("tool_calls") or {}).values())
@@ -266,8 +267,9 @@ def _changes(snapshot, context):
         return None
     files = ch.get("files") or []
     lines = []
-    width = max((len(f["path"]) for f in files), default=0)
-    for f in files:
+    shown = files[:CHANGE_ROWS]
+    width = max((len(f["path"]) for f in shown), default=0)
+    for f in shown:
         if f.get("note"):
             what = f"({f['note']})"
         elif f.get("new_lines") is not None:
@@ -278,17 +280,19 @@ def _changes(snapshot, context):
             what = "(deleted)"
         else:
             what = ""
-        if f.get("committed"):
+        if f.get("committed") and "committed" not in what:
             what = (what + " committed").strip()
         lines.append(f"{f['status'].ljust(2)} {f['path'].ljust(width)}  {what}".rstrip())
     where = ch.get("where") or "the project checkout"
     committed = sum(1 for f in files if f.get("committed"))
     state = "" if not files else (", uncommitted" if not committed else (", committed" if committed == len(files) else f", {committed} of them committed"))
     head = f"<b>Changes</b> · {len(files)} file{'s' if len(files) != 1 else ''} changed during the run in {where}{state}"
+    if len(files) > CHANGE_ROWS:
+        lines.append(f"… and {len(files) - CHANGE_ROWS} more")
     body = [_fence("\n".join(lines), "text")] if lines else ["Nothing changed."]
     moved = ch.get("head_moved")
     if moved:
-        body.append(f"HEAD moved during the run: {_code(moved['from'])} → {_code(moved['to'])}, {moved['commits']} commit{'s' if moved['commits'] != 1 else ''}.")
+        body.append(f"HEAD moved during the run: {_code(moved['from'])} → {_code(moved['to'])}" + (f", {moved['commits']} commit{'s' if moved['commits'] != 1 else ''}." if moved["commits"] else ", no new commit."))
     if ch.get("not_git"):
         body = ["Not a git checkout, so only what the edit tools wrote is known; files a shell command wrote are not here:", "\n".join(f"- {_code(p)}" for p in ch["not_git"]) or "- none"]
     if ch.get("kept"):

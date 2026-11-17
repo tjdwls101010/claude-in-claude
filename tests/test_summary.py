@@ -156,6 +156,19 @@ class Rendered(unittest.TestCase):
                 self.assertEqual(line.replace("\\|", "").count("|"), 6, line)
         self.assertIn("> - `Bash` `cat a | grep b`", text)
 
+    def test_a_huge_change_list_keeps_the_summary_whole(self):
+        files = [{"status": "??", "path": f"generated/{'d' * 60}/file-{n:05d}.txt", "new_lines": 1} for n in range(12000)]
+        text = schedule.render_summary(self.run_dir(), self.context(changes={"where": "the project checkout", "files": files}))
+        self.assertLess(len(text.encode()), 900_000)
+        self.assertEqual(text.count("<details"), text.count("</details>"))
+        self.assertIn("<b>Continue on your Mac</b>", text)
+        self.assertIn("12000 files changed during the run", text)
+
+    def test_table_rows_escape_pipes_in_branch_names(self):
+        text = schedule.render_summary(self.run_dir(), self.context(tree={"kind": "checkout", "branch": "fix|x", "head": "abc1234", "uncommitted_before": 0}))
+        row = next(l for l in text.splitlines() if l.startswith("| **Local tree**"))
+        self.assertEqual(row.replace("\\|", "").count("|"), 3, row)
+
     def test_limits_cut_the_answer_and_the_prompt(self):
         big = "x" * 500_000
         text = schedule.render_summary(self.run_dir(), self.context(prompt=big))

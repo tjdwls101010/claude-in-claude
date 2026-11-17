@@ -364,6 +364,16 @@ class Trees(Job):
         self.assertIn("new.txt", body.split("</details>", 1)[0])
         self.assertIn("HEAD moved", body)
 
+    def test_a_file_committed_and_changed_again_is_one_file(self):
+        run, finish, summary = self.job(self.job_env(prompt="x [[fake:write:new.txt]] [[fake:commit:work]] [[fake:write_after:new.txt]]"))
+        head = summary.split("<b>Changes</b>", 1)[1].split("</summary>", 1)[0]
+        self.assertIn("1 file changed during the run", head)
+
+    def test_a_branch_switch_without_a_commit_is_shown(self):
+        run, finish, summary = self.job(self.job_env(prompt="x [[fake:branch:another]]"))
+        self.assertIn("HEAD moved during the run: `main @", summary)
+        self.assertIn("another @", summary)
+
     def test_a_group_name_held_by_another_batch_is_refused_and_left_alone(self):
         self.cli_json("batch", "--group", "nightly-44006368956-1", "--task", "x", "--profile", "read-only")
         run, finish, summary = self.job(self.job_env(prompt="x"), worktree=True)
@@ -378,6 +388,7 @@ class Trees(Job):
         self.assertEqual(run.returncode, 1)
         self.assertEqual(self.worker_calls(), [])
         self.assertIn("needs a commit", summary)
+        self.assertNotIn("[!WARNING]", summary, "no group was ever made, so there is nothing to clean or warn about")
 
 
 class HandOver(Job):

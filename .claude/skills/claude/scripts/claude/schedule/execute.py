@@ -22,7 +22,7 @@ from claude.errors import Refusal
 from claude.git import commits_beyond, committed_files, head_commit, numstat, status_snapshot, toplevel
 from claude.github import JOB_HANDLES, annotation, job_context, resume_commands, stop_commands, write_output, write_summary
 from claude.observe import snapshot, wait_ended
-from claude.registry import claim_slot, claude_alive, find_by_origin_job, group_view, is_live, read_job, reap, record_job, resolve_runs_dir, schedule_dir, update_job
+from claude.registry import claim_slot, claude_alive, find_by_origin_job, group_view, is_live, list_groups, read_job, reap, record_job, resolve_runs_dir, schedule_dir, update_job
 from claude.runs import start, stop
 from claude.util import entry_path, invocation
 
@@ -250,8 +250,7 @@ def _changes(spec, rec, meta, edited):
             return {"where": "the worktree", "kind": "worktree", "files": []}
         paths = sorted(snap["entries"])
         counts = numstat(wt["path"], [p for p in paths if snap["entries"][p]["status"] != "??"])
-        files = [{**f, "committed": True} for f in committed_files(snap["root"], wt.get("base"), snap["head"])]
-        files += [_file(snap["root"], p, snap["entries"][p], counts) for p in paths]
+        files = _merged([{**f, "committed": True} for f in committed_files(snap["root"], wt.get("base"), snap["head"])], [_file(snap["root"], p, snap["entries"][p], counts) for p in paths])
         return {"where": "the worktree", "kind": "worktree", "files": files}
     project = spec["project"]
     before = (rec or {}).get("tree_before")
@@ -262,19 +261,32 @@ def _changes(spec, rec, meta, edited):
     fresh = [p for p in paths if p in after["entries"] and p not in before["entries"] and after["entries"][p]["status"] != "??"]
     counts = numstat(project, fresh)
     out = {"where": "the project checkout", "files": []}
-    if before.get("head") != after.get("head") and before.get("head") and after.get("head"):
-        landed = committed_files(after["root"], before["head"], after["head"])
-        out["files"] += [{**f, "committed": True} for f in landed]
+    landed = []
+    if (before.get("head"), before.get("branch")) != (after.get("head"), after.get("branch")) and before.get("head") and after.get("head"):
+        landed = [{**f, "committed": True} for f in committed_files(after["root"], before["head"], after["head"])]
         out["head_moved"] = {"from": f"{before.get('branch') or 'detached'} @ {before['head'][:7]}", "to": f"{after.get('branch') or 'detached'} @ {after['head'][:7]}", "commits": commits_beyond(after["root"], after["head"], before["head"]) or 0}
+    working = []
     for p in paths:
         if p not in after["entries"]:
-            if not any(f["path"] == p for f in out["files"]):
-                out["files"].append({"status": "  ", "path": p, "note": "no longer changed: reverted or committed"})
+            working.append({"status": "  ", "path": p, "note": "no longer changed: reverted or committed"})
         elif p in before["entries"]:
-            out["files"].append({"status": after["entries"][p]["status"], "path": p, "note": "already modified before the run"})
+            working.append({"status": after["entries"][p]["status"], "path": p, "note": "already modified before the run"})
         else:
-            out["files"].append(_file(after["root"], p, after["entries"][p], counts))
+            working.append(_file(after["root"], p, after["entries"][p], counts))
+    out["files"] = _merged(landed, working)
     return out
+
+
+def _merged(committed, working):
+    """One entry per path: a committed file that also shows in the working tree is committed and changed again, and a path the commit explains is not listed twice."""
+    by_path = {f["path"]: f for f in committed}
+    for f in working:
+        c = by_path.get(f["path"])
+        if c is None:
+            by_path[f["path"]] = f
+        elif f.get("note") != "no longer changed: reverted or committed":
+            c["note"] = "committed, then changed again"
+    return [by_path[p] for p in sorted(by_path)]
 
 
 def _file(root, rel, entry, counts):
@@ -291,7 +303,7 @@ def _file(root, rel, entry, counts):
 
 def _clean_group(group, job, registry, project, warnings):
     """K10: clean the worktree group this job created — and only one whose manifest names this job, never a name another batch holds — removing a worktree that holds nothing and releasing the name. Returns what the summary says of it; failures go to `warnings`."""
-    if not group:
+    if not group or group not in {g["name"] for g in list_groups(registry)}:
         return {}
     try:
         if (group_view(registry, group).get("origin") or {}).get("job") != job:
