@@ -9,9 +9,9 @@
     {
       "name": "headless-workers",
       "source": "./",
-      "description": "Run headless Claude Code workers as managed subagents — a handle at once, a compact log, one call that waits for the result and wakes you on stalls, steering with send, stop and resume, groups with a worktree per writer, and schema-shaped results, each turn pinned to a permission profile.",
+      "description": "Run headless Claude Code workers as managed subagents — a handle at once, a compact log, one call that waits for the result and wakes you on stalls, steering with send, stop and resume, groups with a worktree per writer, and schema-shaped results, each turn pinned to a permission profile; and scheduled workers on this Mac through GitHub Actions.",
       "category": "development",
-      "keywords": ["claude-code", "subagent", "headless", "delegation", "orchestration", "background-tasks", "sandbox"]
+      "keywords": ["claude-code", "subagent", "headless", "delegation", "orchestration", "background-tasks", "sandbox", "schedule", "github-actions"]
     }
   ]
 }

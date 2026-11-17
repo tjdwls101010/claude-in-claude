@@ -2,7 +2,7 @@
 
 **Run headless Claude Code workers as managed, steerable background subagents from inside Claude Code.**
 
-[Overview](#1-overview) · [Features](#2-features) · [Quick Start](#3-quick-start) · [Usage](#4-usage) · [Project Status](#5-project-status)
+[Overview](#1-overview) · [Features](#2-features) · [Quick Start](#3-quick-start) · [Usage](#4-usage) · [Scheduling](#5-scheduling) · [Project Status](#6-project-status)
 
 ## 1. Overview
 
@@ -19,11 +19,12 @@ Workers inherit your whole Claude Code environment — CLAUDE.md files, skills, 
 - **Resume with the same rules.** `resume` re-sends the profile, model, effort and schema every turn, because a resumed `claude -p` restores only the model.
 - **Groups and worktrees.** `batch` starts several workers as one named group; `--worktree` gives each fresh writer (a new `write` or `auto` member without a directory of its own) its own git worktree from your local HEAD; `clean` removes them only when that loses nothing.
 - **Structured results.** `--schema` makes the answer JSON of a given shape.
-- **Diagnosis.** `doctor` checks claude's version, login, the sandbox and your current usage limits without starting a worker.
+- **Scheduling.** `schedule` runs a worker unattended at a set time, once or on a cron, on this Mac through the repository's self-hosted runner, with GitHub Actions as its record and controls; `unschedule` removes it.
+- **Diagnosis.** `doctor` checks claude's version, login, the sandbox and your current usage limits without starting a worker, and whether this project is ready for scheduling.
 
 ## 3. Quick Start
 
-Requirements: macOS (Linux is untested), Claude Code 2.1.314 or newer logged in with your claude.ai subscription, [`uv`](https://docs.astral.sh/uv/), git.
+Requirements: macOS (Linux is untested), Claude Code 2.1.314 or newer logged in with your claude.ai subscription, [`uv`](https://docs.astral.sh/uv/), git. Scheduling also needs [`gh`](https://cli.github.com/) and a self-hosted runner (see [Scheduling](#5-scheduling)).
 
 Install as a plugin:
 
@@ -43,7 +44,7 @@ The skill's folder is then, for the plugin, `~/.claude/plugins/cache/claude-in-c
 
 ```json
 "Skill(headless-workers:claude)",
-"Bash(uv run \"/Users/you/.claude/plugins/cache/claude-in-claude/headless-workers/0.1.0/.claude/skills/claude/scripts/cli.py\" *)"
+"Bash(uv run \"/Users/you/.claude/plugins/cache/claude-in-claude/headless-workers/0.2.0/.claude/skills/claude/scripts/cli.py\" *)"
 ```
 
 For the link install the skill is `Skill(claude)` and the path `/Users/you/.claude/skills/claude/scripts/cli.py`. The rule must name the path the way the skill runs it; `doctor` prints it as `invocation`.
@@ -73,8 +74,40 @@ uv run "$CLI" clean --group review
 
 Every command prints one JSON line (or text, where its `--help` says so); `uv run "$CLI" <command> --help` documents its output and exit codes. Runs are recorded in `.claude-runs/` of the repository's main checkout, which ignores itself.
 
-## 5. Project Status
+## 5. Scheduling
 
-Version 0.1.0. Verified on macOS with Claude Code 2.1.314 and a Max subscription. Not included: Linux and Windows verification, workers that message each other directly (run rounds with `batch` and `resume` instead), budget and turn limits, forking sessions, image input, and a worktree for a single run. See [CHANGELOG.md](CHANGELOG.md), [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+A worker can also run unattended at a set time — every night, every Monday, or once tomorrow — on this Mac, with GitHub Actions as its record and controls.
+
+```
+schedule ──▶ GitHub API ──▶ .github/workflows/claude-NAME.yml on the default branch   (the definition; GitHub's cron is a late backup)
+         └─▶ launchctl  ──▶ ~/Library/LaunchAgents/claude-schedule.OWNER-REPO.NAME.plist   (starts the workflow on time)
+
+on time:  LaunchAgent ── gh workflow run ──▶ GitHub ──▶ this repository's self-hosted runner (this Mac)
+            Run:    the worker starts as `start` would, under your login, and the job holds it to its end
+            Finish: stops whatever is still alive, records what changed, writes the run's summary
+```
+
+It needs:
+
+1. a **private** GitHub repository for the project (a public one shows every summary to anyone, and its self-hosted runner runs code from anyone's pull request; `--public-ok` overrides);
+2. a **self-hosted runner** of that repository installed as a service on this Mac (`./svc.sh install`; on a personal account a runner serves one repository);
+3. a runner service that can **read your Claude login** — the default service runs in a security session of its own and cannot; the `schedule` reply's `runner.problems` names this and both ways to fix it;
+4. the Mac **awake** at the time (a time missed in sleep runs once on wake), and `gh` logged in with the `workflow` scope.
+
+A first schedule, by hand:
+
+```bash
+uv run "$CLI" schedule --name nightly-review "Review yesterday's commits on main and report what looks risky, with file and line." --cron "0 3 * * *" --profile read-only
+gh workflow run claude-nightly-review.yml -f mode=check     # the reply's `next`: proves the runner can start a worker
+gh workflow run claude-nightly-review.yml                   # a run now, without waiting for 03:00
+uv run "$CLI" schedule --list
+uv run "$CLI" unschedule --name nightly-review
+```
+
+Times are in this Mac's time zone. Each run's page on GitHub shows a summary: the outcome, the trigger and the tree the worker saw, alerts (failures, denied tool calls), the prompt, the worker's answer, what changed, every tool call, and the commands to continue the session on your Mac; the run is also in `.claude-runs/` like any other, so `status`, `log`, `result` and `resume` work on it. `--at YYYY-MM-DDTHH:MM` runs once and then turns its workflow off. `--worktree` gives each writing run its own checkout of your local HEAD. Pausing is disabling the workflow (`gh workflow disable`); re-running and cancelling are GitHub's too.
+
+## 6. Project Status
+
+Version 0.2.0. Verified on macOS with Claude Code 2.1.314 and a Max subscription; scheduling with gh 2.103 and a self-hosted runner on a private repository. Not included: Linux and Windows verification, scheduling anywhere but macOS and launchd, cron names (`MON`) and intervals under 5 minutes, workers that message each other directly (run rounds with `batch` and `resume` instead), budget and turn limits, forking sessions, image input, and a worktree for a single run. See [CHANGELOG.md](CHANGELOG.md), [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 Licensed under the Apache License 2.0.
