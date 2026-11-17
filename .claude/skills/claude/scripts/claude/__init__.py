@@ -3,7 +3,7 @@
 Features (one per reason to change):
     runs/        start, resume, send and stop; creating a run and the detached supervisor that drives one `claude -p` process
     batch/       several runs as one named group, worktree isolation for its members, and clean
-    observe/     status, log and result, including `result --wait` and the attention that ends a wait early
+    observe/     status, log and result, including `result --wait` and the attention that ends a wait early; `snapshot` and `wait_ended`, the structure they render, for callers that read a run without parsing text
     doctor.py    the environment a run would start in, and the account's usage limits
 
 Systems (formats someone else owns):

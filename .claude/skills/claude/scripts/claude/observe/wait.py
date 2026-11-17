@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import time
 
-from claude.registry import TERMINAL, claude_alive
+from claude.registry import TERMINAL, claude_alive, find_run, resolve_runs_dir
 from claude.util import now, timings
 
 from .rows import attention, last_event_at, load
+from .snapshot import snapshot_of
 
 
 def wait(run_dirs, timeout=None):
@@ -42,3 +43,14 @@ def wait(run_dirs, timeout=None):
         if timeout is not None and at - began >= timeout:
             return "timeout", {}
         time.sleep(max(t["poll"], 0.05))
+
+
+def wait_ended(*, cwd, ref, runs_dir=None, on_attention=None):
+    """Block until the run `ref` names has ended, whatever attention it needs meanwhile; `on_attention(items)` is called with each attention that is new since the last one. Returns the ended run's `snapshot`."""
+    run_dir = find_run(resolve_runs_dir(cwd, runs_dir), ref)
+    while True:
+        reason, fresh = wait([run_dir])
+        if reason == "ended":
+            return snapshot_of(run_dir)
+        if on_attention and fresh.get(run_dir):
+            on_attention(fresh[run_dir])
