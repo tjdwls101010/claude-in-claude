@@ -1,0 +1,5 @@
+{
+ "exit": 0,
+ "stdout": "{\"hosts\":{\"github.com\":[{\"state\":\"success\",\"active\":true,\"host\":\"github.com\",\"login\":\"tjdwls101010\",\"tokenSource\":\"keyring\",\"scopes\":\"delete_repo, gist, read:org, repo, workflow\",\"gitProtocol\":\"https\"}]}}\n",
+ "stderr": ""
+}

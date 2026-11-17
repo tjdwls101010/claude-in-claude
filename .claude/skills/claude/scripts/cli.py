@@ -25,7 +25,7 @@ from claude.doctor import doctor
 from claude.errors import Refusal
 from claude.observe import GROUP_MESSAGE_CAP, LISTING_ROWS, STALL_SECONDS, log, result, status
 from claude.runs import DEFAULTS, EFFORTS, SEND_LIMIT, resume, send, start, stop, supervise
-from claude.schedule import scheduled_finish, scheduled_run
+from claude.schedule import NAME_RULE, SCHEDULE_DEFAULTS, schedule, scheduled_finish, scheduled_run, schedules, unschedule
 
 EXIT_REFUSED, EXIT_ARGUMENTS, EXIT_BLOCKED = 1, 2, 3
 
@@ -122,6 +122,23 @@ The environment a run would start in, checked without starting a worker: Python;
 Prints: one JSON line — `ok`, `blockers`, `warnings`, then `python`, `claude` (`path`, `version`, `floor`, `verified`), `auth`, `sandbox` (`platform`, `supported`, `missing`), `quota` (`limits`, each with `kind`, `percent`, `resets_at`, `scope`, `severity`; or `error`), `skill_dir`, `entry`, `invocation` (the command form the pre-approval matches), `registry` (`path`, `exists`, `writable`, `live_runs`, `groups`, `worktrees`), and `profile_exceptions` per profile.
 Exits: 0 no blocker; 3 a blocker would stop every run — no claude, a claude older than {VERSION_FLOOR_TEXT}, not logged in, Python below 3.11, a registry that cannot be written; 2 an argument the parser refuses."""
 
+SCHEDULE_DESC = f"""\
+Run a worker later, once or on a schedule, unattended on this Mac, with GitHub Actions as its record and controls. Commits .github/workflows/claude-NAME.yml to the repository's default branch through the GitHub API (no pull request; it holds the prompt, which stays in git history after `unschedule`) and installs a LaunchAgent on this Mac that starts the workflow on time; GitHub's own cron in the file is a late backup, and a late duplicate of a time that already ran is skipped. Each run is a job on this repository's self-hosted runner: the worker starts as `start` would, nobody can answer it, the job holds it until it ends (--timeout is its limit; attention is only a warning), and the job's summary shows the prompt, the answer, the changes, the activity and how to continue it here. A read-only run whose start failed is tried once more by the next automatic trigger for the same time.
+Called again with the same --name, only the flags given change; everything else keeps what the committed workflow records, and the workflow is enabled again if it was disabled.
+Prints: one JSON line — `name`, `repo`, `workflow` (`status` committed or unchanged, `path`, `url`, `commit`, `was_disabled`), `dispatcher` (`status` installed or failed, `label`, `plist`, `error`), `fires` (`timezone`, `cron` or `at`, the `next` three times), `settings`, `runner` (the repository's `registered` runners with `name`, `status`, `labels`; this Mac's runner services in `local` with `session_create`, `env_token`, `path_has`; and `problems`, each `problem` — none (no runner with every label the job asks for), offline (this Mac's runner), not_local, session_create, path_missing — with `why` and the `fixes`; `error` instead of `problems` when the runners could not be listed), `warnings`, and `next` (the check run that proves the runner can start a worker). With --dry-run nothing is written: `workflow_text`, `dispatcher_text`, `fires`, `settings`, `runner`. With --list: `schedules` (per schedule `name`, `cron` or `at`, `profile`, `state` active or disabled, `dispatcher` loaded or missing, `stale_entry` with `stale_paths` and `fix` when a path in the workflow is gone, `last` job) and `orphans` (dispatchers whose workflow is gone).
+Exits: 0 committed and installed, or listed — a dispatcher that failed to install is still 0 and says so in `dispatcher`; 1 refused or failed — run from inside a worker, not macOS, gh missing, not logged in or without the `workflow` scope, not a git checkout with a GitHub remote, a public repository without --public-ok, a workflow of that name the skill did not write, or GitHub refused the commit (branch protection: `instead` says how to commit it through a pull request); 2 the command line must change — a name that breaks the rule, a new schedule without a prompt, --profile or a time, both --cron and --at, a cron form or interval this skill does not take or one that never fires, an --at that has passed or is not zero-padded, a one-off whose time has passed called again without a new --at, --worktree with read-only, an unreadable --prompt-file or --schema, a prompt with a control character."""
+
+SCHEDULE_EPILOG = f"""\
+Time: --cron and --at are in this Mac's time zone, which launchd fires in and which the workflow's `timezone:` names; never convert them to UTC. --cron takes five numeric fields (minute hour day-of-month month day-of-week; `*`, `,`, `-`, `/`, no names like MON), fires at most every 5 minutes, and with both day fields restricted fires on either, as cron does. --at YYYY-MM-DDTHH:MM runs once; the run then disables its workflow and removes its dispatcher.
+The Mac must be awake: a time missed in sleep runs once on wake. A job waits up to 24 hours for this repository's runner to be online and free, then fails; one runner runs one job at a time, so a long worker holds back the repository's other jobs.
+Defaults: --model {SCHEDULE_DEFAULTS['model']}, --effort {SCHEDULE_DEFAULTS['effort']}, --timeout {SCHEDULE_DEFAULTS['timeout']}, --runs-on self-hosted; the job's own limit is --timeout plus 10 minutes.
+The runs, their pause, re-run, cancel and logs are GitHub's: `gh workflow disable|enable`, `gh run list|view|rerun|cancel`, or the repository's Actions page."""
+
+UNSCHEDULE_DESC = """\
+Remove a schedule: unload and delete its dispatcher LaunchAgent, and delete its workflow file from the default branch through the GitHub API. Past runs stay in the repository's Actions history, and the prompt stays in git history. A run of the schedule still live keeps the schedule's local state until it ends, without its definition, so it disables nothing.
+Prints: one JSON line — `name`, `repo`, `dispatcher` (`status` removed, absent or failed, `label`, `plist`, `error`), `workflow` (`status` deleted, absent or failed, `path`, `commit`, `error`), and `note` when a live run kept the local state.
+Exits: 0 every part was tried (each says how it went); 1 refused before anything was removed — run from inside a worker, not macOS, gh missing, not logged in or without the `workflow` scope, not a git checkout with a GitHub remote, a repository gh cannot see, or a claude-NAME.yml this skill did not write (left alone); 2 the command line must change — no --name, or one that breaks the rule."""
+
 
 class OneLinePerParagraph(argparse.HelpFormatter):
     """Each help paragraph and list item as one physical line, never re-wrapped; suppressed subcommands left out of the listing."""
@@ -143,7 +160,7 @@ class OneLinePerParagraph(argparse.HelpFormatter):
         return super()._format_action(action)
 
 
-VISIBLE = ("start", "resume", "send", "batch", "status", "log", "result", "stop", "clean", "doctor")
+VISIBLE = ("start", "resume", "send", "batch", "status", "log", "result", "stop", "clean", "schedule", "unschedule", "doctor")
 
 
 class ArgumentError(Exception):
@@ -251,6 +268,33 @@ def build_parser():
     p.add_argument("--force", action="store_true", help="also remove worktrees holding uncommitted, untracked or ignored work, discarding it; live work and branches with commits are still kept")
     add_registry(p)
 
+    p = sub.add_parser("schedule", usage="cli.py schedule --name NAME [PROMPT | --prompt-file FILE] (--cron EXPR | --at YYYY-MM-DDTHH:MM) --profile P [options]\n       cli.py schedule --list", help="run a worker later or on a schedule, through this repository's runner", description=SCHEDULE_DESC, epilog=SCHEDULE_EPILOG, formatter_class=OneLinePerParagraph)
+    p.add_argument("prompt", nargs="?", metavar="PROMPT", help="what the worker should do, standing on its own: nobody can answer it and nobody saw this conversation; or give --prompt-file. Required for a new schedule; given again, it replaces the recorded one")
+    p.add_argument("--prompt-file", metavar="FILE", help="read the prompt from FILE; `-` reads stdin (stdin is read only then)")
+    p.add_argument("--name", metavar="NAME", help="the schedule's name: lowercase letters, digits and hyphens, at most 24; the workflow is claude-NAME.yml")
+    when = p.add_mutually_exclusive_group()
+    when.add_argument("--cron", metavar="EXPR", help="five numeric cron fields in this Mac's time zone, e.g. '0 3 * * *' (see below)")
+    when.add_argument("--at", metavar="YYYY-MM-DDTHH:MM", help="run once at this local time (this Mac's time zone)")
+    p.add_argument("--profile", choices=PROFILES, help="what the worker may do (see start --help); required for a new schedule, since nobody is there to widen it")
+    p.add_argument("--model", help=f"model alias or id (default {SCHEDULE_DEFAULTS['model']})")
+    p.add_argument("--effort", choices=EFFORTS, help=f"reasoning effort (default {SCHEDULE_DEFAULTS['effort']})")
+    p.add_argument("--schema", metavar="FILE", help="a JSON Schema file: the run's answer is structured output of that shape, shown as JSON in the summary; its text goes into the workflow, so the file may go")
+    p.add_argument("--timeout", type=positive, metavar="SEC", help=f"stop the run after SEC seconds and record it timed_out (default {SCHEDULE_DEFAULTS['timeout']})")
+    wt = p.add_mutually_exclusive_group()
+    wt.add_argument("--worktree", dest="worktree", action="store_const", const=True, help="run each time in a fresh git worktree of the local HEAD instead of the checkout (write and auto only); a worktree with changes is kept for you to take them, one without is removed")
+    wt.add_argument("--no-worktree", dest="worktree", action="store_const", const=False, help="run in the project checkout as it is when the job starts (the default)")
+    p.add_argument("--runs-on", metavar="LABEL", action="append", help="a label the runner must have besides self-hosted; repeat for several")
+    p.add_argument("--message", metavar="TEXT", help="the commit message (default: `Schedule Claude worker NAME: WHEN`)")
+    p.add_argument("--public-ok", action="store_true", help="allow a public repository, whose Actions logs and summaries anyone can read and whose self-hosted runner runs code from anyone's pull request on this Mac")
+    p.add_argument("--dry-run", action="store_true", help="write nothing: print the workflow and the dispatcher that would be written")
+    p.add_argument("--list", action="store_true", help="list this repository's schedules instead")
+    p.add_argument("--project", metavar="DIR", help="the project, a git checkout with a GitHub remote (default: the current directory)")
+
+    p = sub.add_parser("unschedule", usage="cli.py unschedule --name NAME [--message TEXT] [--project DIR]", help="remove a schedule's dispatcher and workflow", description=UNSCHEDULE_DESC, formatter_class=OneLinePerParagraph)
+    p.add_argument("--name", metavar="NAME", required=True, help="the schedule to remove")
+    p.add_argument("--message", metavar="TEXT", help="the commit message (default: `Unschedule Claude worker NAME`)")
+    p.add_argument("--project", metavar="DIR", help="the project (default: the current directory)")
+
     p = sub.add_parser("doctor", usage="cli.py doctor [--project DIR]", help="check the environment a run would start in", description=DOCTOR_DESC, formatter_class=OneLinePerParagraph)
     add_registry(p)
 
@@ -299,6 +343,41 @@ def read_text(value, path, command, what="prompt"):
 
 def read_prompt(args, command):
     return read_text(args.prompt, args.prompt_file, command)
+
+
+def schedule_prompt(args):
+    """K24: the prompt from PROMPT or --prompt-file, stdin only for `--prompt-file -`; None when neither is given (a schedule called again keeps its prompt)."""
+    if args.prompt is not None and args.prompt_file:
+        raise Refusal("give the prompt once: PROMPT or --prompt-file", arguments=True, help="schedule --help")
+    if args.prompt_file == "-":
+        text = sys.stdin.read()
+    elif args.prompt_file:
+        try:
+            text = Path(args.prompt_file).expanduser().read_text(encoding="utf-8")
+        except OSError as e:
+            raise Refusal(f"--prompt-file {args.prompt_file}: {e.strerror or e}", arguments=True, help="schedule --help")
+    elif args.prompt is not None:
+        text = args.prompt
+    else:
+        return None
+    if not text.strip():
+        raise Refusal("the prompt is empty", arguments=True, help="schedule --help")
+    return text
+
+
+def schedule_schema(path):
+    """The --schema file's JSON object as compact text (K22), or None."""
+    if not path:
+        return None
+    try:
+        obj = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    except OSError as e:
+        raise Refusal(f"--schema {path}: {e.strerror or e}", arguments=True, help="schedule --help")
+    except ValueError as e:
+        raise Refusal(f"--schema {path} is not JSON: {e}", arguments=True, help="schedule --help")
+    if not isinstance(obj, dict):
+        raise Refusal(f"--schema {path} must hold a JSON object", arguments=True, help="schedule --help")
+    return json.dumps(obj, ensure_ascii=False)
 
 
 def base_dir(args):
@@ -354,6 +433,22 @@ def dispatch(args):
         return 0
     if c == "stop":
         emit(stop(refs=args.run or [], group=args.group, cwd=base_dir(args), runs_dir=args.runs_dir))
+        return 0
+    if c == "schedule":
+        if args.list:
+            emit(schedules(cwd=base_dir(args)))
+            return 0
+        if not args.name:
+            raise Refusal("--name is required", arguments=True, help="schedule --help")
+        if not NAME_RULE.match(args.name):
+            raise Refusal(f"--name {args.name!r}: lowercase letters, digits and hyphens, starting with a letter or digit, at most 24", arguments=True, help="schedule --help")
+        flags = {"prompt": schedule_prompt(args), "schema": schedule_schema(args.schema), "cron": args.cron, "at": args.at, "profile": args.profile, "model": args.model, "effort": args.effort, "timeout": args.timeout, "worktree": args.worktree, "runs_on": args.runs_on}
+        emit(schedule(name=args.name, flags=flags, cwd=base_dir(args), dry_run=args.dry_run, public_ok=args.public_ok, message=args.message))
+        return 0
+    if c == "unschedule":
+        if not NAME_RULE.match(args.name):
+            raise Refusal(f"--name {args.name!r}: lowercase letters, digits and hyphens, starting with a letter or digit, at most 24", arguments=True, help="unschedule --help")
+        emit(unschedule(name=args.name, cwd=base_dir(args), message=args.message))
         return 0
     if c == "doctor":
         reply = doctor(cwd=base_dir(args), runs_dir=args.runs_dir)

@@ -1,0 +1,121 @@
+"""LaunchAgents through launchd: the plist that starts a program on calendar times in the Mac's own time zone, loading and unloading it in the user's GUI domain, and what is loaded. launchd fires a time missed in sleep once on wake, coalescing several (man launchd.plist)."""
+
+from __future__ import annotations
+
+import os
+import plistlib
+import shutil
+import subprocess
+import sys
+from itertools import product
+from pathlib import Path
+
+# A dispatcher with more calendar entries than this is refused; ask for a coarser time (K6).
+CALENDAR_LIMIT = 500
+KEYS = (("minute", "Minute"), ("hour", "Hour"), ("month", "Month"))
+
+
+def supported():
+    """Whether this platform has launchd."""
+    return sys.platform == "darwin" and bool(shutil.which("launchctl"))
+
+
+def agents_dir():
+    return Path(os.path.expanduser("~")) / "Library" / "LaunchAgents"
+
+
+def _domain():
+    return f"gui/{os.getuid()}"
+
+
+def _launchctl(*args):
+    try:
+        proc = subprocess.run(["launchctl", *args], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 1, str(e)
+    return proc.returncode, (proc.stderr or proc.stdout).strip()
+
+
+def calendar_entries(fields):
+    """`StartCalendarInterval` for cron-style fields (`minute`, `hour`, `day`, `month`, `weekday` as value lists, None for any): one dictionary per combination of the restricted fields; with both day and weekday restricted, the day dictionaries and the weekday dictionaries, either of which fires, as in cron. ValueError beyond CALENDAR_LIMIT."""
+    base = [(key, fields.get(name)) for name, key in KEYS if fields.get(name) is not None]
+
+    def combos(extra):
+        items = base + extra
+        names = [k for k, _ in items]
+        return [dict(zip(names, values)) for values in product(*[v for _, v in items])]
+
+    day, weekday = fields.get("day"), fields.get("weekday")
+    if day is not None and weekday is not None:
+        entries = combos([("Day", day)]) + combos([("Weekday", weekday)])
+    elif day is not None:
+        entries = combos([("Day", day)])
+    elif weekday is not None:
+        entries = combos([("Weekday", weekday)])
+    else:
+        entries = combos([])
+    if len(entries) > CALENDAR_LIMIT:
+        raise ValueError(f"this time needs {len(entries)} launchd calendar entries, more than {CALENDAR_LIMIT}; choose a coarser time")
+    return entries
+
+
+def render_agent(label, argv, calendar, log):
+    """The plist of an agent that runs `argv` at the `calendar` times, its output appended to `log`."""
+    return plistlib.dumps({"Label": label, "ProgramArguments": list(argv), "StartCalendarInterval": calendar, "StandardOutPath": str(log), "StandardErrorPath": str(log), "RunAtLoad": False, "ProcessType": "Background"}).decode("utf-8")
+
+
+def install_agent(label, argv, calendar, log):
+    """Write the agent's plist to ~/Library/LaunchAgents and load it, replacing a loaded one of the same label. Returns `{status: installed, label, plist}`, or `{status: failed, label, plist, error}`."""
+    path = agents_dir() / f"{label}.plist"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Path(log).parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(render_agent(label, argv, calendar, log), encoding="utf-8")
+    except OSError as e:
+        return {"status": "failed", "label": label, "plist": str(path), "error": f"could not write the plist: {e}"}
+    _launchctl("bootout", f"{_domain()}/{label}")
+    code, err = _launchctl("bootstrap", _domain(), str(path))
+    if code != 0:
+        return {"status": "failed", "label": label, "plist": str(path), "error": f"launchctl bootstrap exited {code}: {err}"}
+    return {"status": "installed", "label": label, "plist": str(path)}
+
+
+def remove_agent(label):
+    """Unload the agent and delete its plist. `{status: removed | absent | failed, label, plist}` (with `error` when failed)."""
+    path = agents_dir() / f"{label}.plist"
+    loaded = agent_state(label) == "loaded"
+    if not loaded and not path.exists():
+        return {"status": "absent", "label": label, "plist": str(path)}
+    if loaded:
+        code, err = _launchctl("bootout", f"{_domain()}/{label}")
+        if code != 0 and agent_state(label) == "loaded":
+            return {"status": "failed", "label": label, "plist": str(path), "error": f"launchctl bootout exited {code}: {err}"}
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        return {"status": "failed", "label": label, "plist": str(path), "error": f"could not delete the plist: {e}"}
+    return {"status": "removed", "label": label, "plist": str(path)}
+
+
+def agent_state(label):
+    """`loaded`, `unloaded` (its plist exists but launchd does not run it) or `missing`."""
+    code, _ = _launchctl("print", f"{_domain()}/{label}")
+    if code == 0:
+        return "loaded"
+    return "unloaded" if (agents_dir() / f"{label}.plist").exists() else "missing"
+
+
+def list_agents(prefix):
+    """The labels of the plists in ~/Library/LaunchAgents whose label starts with `prefix`."""
+    d = agents_dir()
+    return sorted(p.stem for p in d.glob(f"{prefix}*.plist")) if d.is_dir() else []
+
+
+def system_timezone():
+    """The IANA name of the time zone launchd fires in — this Mac's (/etc/localtime) — or None."""
+    try:
+        target = os.path.realpath("/etc/localtime")
+    except OSError:
+        return None
+    marker = "/zoneinfo/"
+    return target.split(marker, 1)[1] if marker in target else None

@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""A stand-in for `launchctl`, first on PATH in schedule tests. It records every call under $FAKE_LAUNCHCTL_STATE/calls/ and keeps the loaded labels in $FAKE_LAUNCHCTL_STATE/loaded.json. Messages and exit codes are the real ones for a label that is not loaded (captured on macOS): print 113, bootout 3, a failed bootstrap 5. FAKE_LAUNCHCTL_FAIL=bootstrap|bootout makes that subcommand fail."""
+
+import json
+import os
+import plistlib
+import sys
+import time
+from pathlib import Path
+
+STATE = Path(os.environ.get("FAKE_LAUNCHCTL_STATE", "/tmp/fake-launchctl"))
+(STATE / "calls").mkdir(parents=True, exist_ok=True)
+(STATE / "calls" / f"{time.time_ns()}-{os.getpid()}.json").write_text(json.dumps({"argv": sys.argv[1:]}))
+loaded_path = STATE / "loaded.json"
+loaded = json.loads(loaded_path.read_text()) if loaded_path.exists() else {}
+fail = os.environ.get("FAKE_LAUNCHCTL_FAIL", "").split(",")
+cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+
+
+def save():
+    loaded_path.write_text(json.dumps(loaded))
+
+
+if cmd == "print":
+    label = sys.argv[2].rsplit("/", 1)[-1]
+    if label in loaded:
+        print(f"gui/501/{label} = {{\n\tstate = waiting\n\tpath = {loaded[label]}\n}}")
+        sys.exit(0)
+    print(f'Bad request.\nCould not find service "{label}" in domain for user gui: 501', file=sys.stderr)
+    sys.exit(113)
+if cmd == "bootout":
+    label = sys.argv[2].rsplit("/", 1)[-1]
+    if "bootout" in fail or label not in loaded:
+        print("Boot-out failed: 3: No such process", file=sys.stderr)
+        sys.exit(3)
+    loaded.pop(label)
+    save()
+    sys.exit(0)
+if cmd == "bootstrap":
+    path = sys.argv[3]
+    try:
+        label = plistlib.loads(Path(path).read_bytes())["Label"]
+    except (OSError, KeyError, ValueError):
+        label = None
+    if "bootstrap" in fail or label is None or label in loaded:
+        print("Bootstrap failed: 5: Input/output error\nTry re-running the command as root for richer errors.", file=sys.stderr)
+        sys.exit(5)
+    loaded[label] = path
+    save()
+    sys.exit(0)
+print(f"fake launchctl: {cmd} not supported", file=sys.stderr)
+sys.exit(64)

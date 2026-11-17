@@ -1,0 +1,5 @@
+{
+ "exit": 0,
+ "stdout": "{\"total_count\":1,\"runners\":[{\"id\":2,\"name\":\"claude-probe\",\"os\":\"macOS\",\"status\":\"online\",\"busy\":false,\"version\":\"2.338.2\",\"labels\":[{\"id\":0,\"name\":\"self-hosted\",\"type\":\"read-only\"},{\"id\":0,\"name\":\"macOS\",\"type\":\"read-only\"},{\"id\":0,\"name\":\"ARM64\",\"type\":\"read-only\"},{\"id\":0,\"name\":\"claude-probe\",\"type\":\"custom\"}]}]}",
+ "stderr": ""
+}
