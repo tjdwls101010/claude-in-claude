@@ -45,15 +45,7 @@ A batch is for when N workers should be one name you watch, collect and stop. **
 
 ## Scheduling a worker
 
-**Nobody is there when it runs**, and every run draws on your subscription's limits. The profile and `--timeout` are its only bounds, so the prompt has to say on its own what to look at, what counts as done and what the answer should hold; the answer becomes the run's summary on GitHub.
-
-**`schedule` changes things outside this conversation that outlive it**: a commit to the repository's default branch without a pull request, and a LaunchAgent on this Mac. Whatever the prompt holds stays in git history after `unschedule` and is published with every run to whoever can read the repository's Actions. A public repository shows that to anyone and lets anyone's pull request run code on this Mac, so `--public-ok` is the repository owner's call.
-
-**Only a check run proves a schedule will run.** Jobs run in the runner's service, not your login session, so `doctor` here cannot see whether the service can read the Claude login; the reply's `next` is the check. Where the reply's `runner.problems` gives more than one fix, such as how the service gets the login, the choice is the Mac owner's.
-
-**The worker sees the checkout as it is when the job starts it**: not as it was at the scheduled time, and not the commit GitHub shows for the run. `--worktree` gives each run its own checkout; taking its changes is yours.
-
-**Afterwards it is a run like any other**: `status`, `log`, `result` and `resume` work on it, and the summary's *Continue on your Mac* gives the calls.
+**Every run draws on the subscription's limits with nobody watching**, for as long as the schedule stands, so how often it runs and its `--timeout` are a cost the person sets. **Some fixes are the owner's to choose**: scheduling in a public repository (`--public-ok`) lets anyone's pull request run code on this Mac, and where the reply's `runner.problems` offers more than one fix, such as how the runner's service gets the Claude login, each exposes that login differently.
 
 ## When something goes wrong
 

@@ -270,7 +270,7 @@ def run_session(out, number, variant, timeout):
         world = json.loads((state / "world.json").read_text())
         repo = world["repos"][FAKE_REPO]
         bash = [b["input"].get("command", "") for e in events if e.get("type") == "assistant" for b in e["message"].get("content") or [] if b.get("type") == "tool_use" and b.get("name") == "Bash"]
-        scheds = [c for c in commands if re.search(r'cli\.py" schedule ', c)]
+        scheds = [c for c in commands if re.search(r'cli\.py" schedule ', c) and "--help" not in c]
         committed = {path: f["text"] for path, f in repo.get("files", {}).items()}
         spec = None
         for text in committed.values():
