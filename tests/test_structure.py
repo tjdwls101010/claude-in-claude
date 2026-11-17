@@ -28,6 +28,7 @@ KINDS = {
     "claude_cli": "system",
     "git": "system",
     "github": "system",
+    "launchd": "system",
     "errors": "shared",
     "util": "shared",
 }

@@ -20,12 +20,14 @@ from claude.batch import batch, clean
 from claude.claude_cli import auth_status, claude_version, render_rows, sandbox_prereqs, version_floor_check
 from claude.errors import Refusal
 from claude.git import commits_beyond, committed_files, head_commit, numstat, status_snapshot, toplevel
-from claude.github import JOB_HANDLES, annotation, job_context, resume_commands, stop_commands, write_output, write_summary
+from claude.github import JOB_HANDLES, GitHubError, annotation, job_context, resume_commands, set_workflow_enabled, stop_commands, workflow_file, write_output, write_summary
+from claude.launchd import remove_agent
 from claude.observe import snapshot, wait_ended
-from claude.registry import claim_slot, claude_alive, find_by_origin_job, group_view, is_live, list_groups, read_job, reap, record_job, resolve_runs_dir, schedule_dir, update_job
+from claude.registry import claim_slot, claude_alive, find_by_origin_job, group_view, is_live, list_groups, read_definition, read_job, reap, record_job, resolve_runs_dir, schedule_dir, schedule_lock, update_job
 from claude.runs import start, stop
 from claude.util import entry_path, invocation
 
+from .spec import dispatcher_label
 from .summary import render_summary
 from .times import current_slot
 
@@ -180,7 +182,7 @@ def scheduled_run(spec, env, write):
             return 0
         slot = current_slot(spec, now)
         if slot is None:
-            record_job(registry, name, job, {**entry, "outcome": {"kind": "skipped", "reason": f"the one-off time {spec['at']} has not come"}})
+            record_job(registry, name, job, {**entry, "outcome": {"kind": "skipped", "early": True, "reason": f"the one-off time {spec['at']} has not come"}})
             step.say(f"skipped: the one-off time {spec['at']} has not come; only a manual run starts it early")
             return 0
         claim = claim_slot(registry, name, slot, job, entry)
@@ -332,6 +334,38 @@ def _tree(spec, rec, meta):
     return {"kind": "checkout", "branch": before.get("branch"), "head": before.get("head"), "uncommitted_before": len(before.get("entries") or {})}
 
 
+NOT_COMPLETED = ("failed", "timed_out", "orphaned")
+
+
+def _end_one_off(spec, ctx, registry, rec, state):
+    """K8: a one-off's automatic job turns its schedule off once its time will not be tried again — the run completed, it was stopped, it was a writer (never retried), it was itself the retry, or the time is long past — and only while the definition this job was started from is still the one this Mac recorded (a schedule called again or removed meanwhile is not touched). Returns (notes, warnings) for the summary."""
+    if not spec.get("at") or rec.get("trigger") not in AUTOMATIC:
+        return [], []
+    outcome = (rec.get("outcome") or {}).get("kind")
+    if (rec.get("outcome") or {}).get("early"):
+        return [], []
+    not_completed = state in NOT_COMPLETED or outcome == "refused"
+    if not_completed and rec.get("profile") == "read-only" and not rec.get("retry_of"):
+        return ["This one-off's run did not complete; the next automatic trigger for its time retries it once, and that run turns the schedule off."], []
+    repo = ctx.get("repository")
+    name = spec["name"]
+    notes, warnings = [], []
+    with schedule_lock(registry, name):
+        current = read_definition(registry, name)
+        if current != spec.get("definition"):
+            return ["This one-off was scheduled again or removed while it ran, so this run left the newer definition alone."], []
+        file = workflow_file(name)
+        try:
+            set_workflow_enabled(repo, file, False)
+            notes.append(f"This one-off is done: its workflow is disabled (`gh workflow enable {file} --repo {repo}` and a manual run would run it again; a disabled workflow cannot be re-run).")
+        except GitHubError as e:
+            warnings.append(f"The one-off's workflow could not be disabled ({e.message}); `gh workflow disable {file} --repo {repo}` does it.")
+        gone = remove_agent(dispatcher_label(repo, name))
+        if gone["status"] == "failed":
+            warnings.append(f"The one-off's dispatcher could not be removed ({gone.get('error')}); `unschedule --name {name}` removes it.")
+    return notes, warnings
+
+
 def _render_kept(snap, context, warnings, local):
     """Render the summary and keep a copy at `local` (K17); a copy that cannot be written becomes one more warning in what GitHub gets."""
     text = render_summary(snap, {**context, "warnings": warnings})
@@ -385,7 +419,9 @@ def scheduled_finish(spec, env, write):
         if outcome["kind"] == "refused":
             # A worktree group claimed before the start was refused holds nothing; it is released, as after any run (K10).
             _clean_group(rec.get("group"), job, registry, project, warnings)
-        text = _render_kept(None, {**base, "at": rec.get("at") or clock(), "outcome": outcome, "prompt": None if outcome["kind"] == "check" else base["prompt"]}, warnings, local)
+        notes, ended = _end_one_off(spec, ctx, registry, rec, None) if outcome["kind"] != "check" else ([], [])
+        warnings += ended
+        text = _render_kept(None, {**base, "at": rec.get("at") or clock(), "outcome": outcome, "notes": notes, "prompt": None if outcome["kind"] == "check" else base["prompt"]}, warnings, local)
         if outcome["kind"] == "refused" or (outcome["kind"] == "check" and not outcome.get("ok")):
             step.command(annotation("error", f"{name} failed", outcome.get("error") or "the check failed"))
         return _post(step, name, ctx, text)
@@ -428,10 +464,12 @@ def scheduled_finish(spec, env, write):
             warnings.append(f"What changed could not be read: {e}")
     if changes is not None:
         changes.update(_clean_group(rec.get("group"), job, registry, project, warnings))
+    notes, ended = _end_one_off(spec, ctx, registry, rec, (meta or {}).get("state"))
+    warnings += ended
     if unconfirmed:
         warnings.insert(0, f"**The worker could not be confirmed stopped:** {unconfirmed}. Check this Mac, and `{invocation('stop', '--run', run_id, '--project', project)}`.")
     rel = os.path.relpath(run_dir, project)
-    context = {**base, "tree": _tree(spec, rec, meta), "changes": changes, "attention": rec.get("attention") or [], "stopped_by_finish": stopped_by_finish, "continue": {"cli": entry_path(), "project": project, "run_dir": (run_dir if rel.startswith("..") else rel) + "/"}, "log_call": invocation("log", "--run", run_id, "--project", project)}
+    context = {**base, "notes": notes, "tree": _tree(spec, rec, meta), "changes": changes, "attention": rec.get("attention") or [], "stopped_by_finish": stopped_by_finish, "continue": {"cli": entry_path(), "project": project, "run_dir": (run_dir if rel.startswith("..") else rel) + "/"}, "log_call": invocation("log", "--run", run_id, "--project", project)}
     if snap is None:
         context.update({"at": clock(), "outcome": {"kind": "none", "title": "unreadable run", "error": f"Run {run_id} cannot be read."}})
     text = _render_kept(snap, context, warnings, str(Path(run_dir) / "summary.md"))

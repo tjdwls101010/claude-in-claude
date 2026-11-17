@@ -227,6 +227,7 @@ def _alerts(snapshot, context):
             warning.append("**It needed attention while it ran**, which nobody could give: " + "; ".join(f"{a.get('reason')} at {a.get('at')}" for a in seen[:10]))
     for w in context.get("warnings") or []:
         warning.append(w)
+    note += context.get("notes") or []
     if caution:
         out.append("> [!CAUTION]\n" + _quote(caution))
     if warning:

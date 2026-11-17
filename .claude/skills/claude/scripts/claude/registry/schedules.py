@@ -158,3 +158,42 @@ def read_job(registry, name, job):
 def find_by_origin_job(registry, job):
     """The run directories whose meta's `origin.job` is `job`, oldest first."""
     return [d for d, m in iter_runs(registry) if (m.get("origin") or {}).get("job") == job]
+
+
+def schedule_lock(registry, name):
+    """The schedule's lock, for callers that must hold it across their own steps: `schedule`'s commit and install, `unschedule`, and a one-off Finish comparing the definition and disabling it (K8). The functions below that say so must be called under it; every other function here takes it itself."""
+    ensure_runs_dir(registry)
+    return _lock(registry, name)
+
+
+def read_definition(registry, name):
+    """The definition the latest `schedule` committed, as this Mac recorded it, or None. Call under schedule_lock."""
+    return (schedule_state(registry, name) or {}).get("definition")
+
+
+def write_definition(registry, name, definition):
+    """Record the definition just committed, or None after `unschedule`. Call under schedule_lock."""
+    state = _load(registry, name)
+    state["definition"] = definition
+    _save(registry, name, state)
+
+
+def remove_schedule_state(registry, name):
+    """Delete the schedule's state and files. Call under schedule_lock."""
+    import shutil
+
+    shutil.rmtree(schedule_dir(registry, name), ignore_errors=True)
+
+
+def latest_job(registry, name):
+    """The newest job record of the schedule as `(job, record)`, or None."""
+    jobs = (schedule_state(registry, name) or {}).get("jobs") or {}
+    if not jobs:
+        return None
+    job = max(jobs, key=lambda k: (jobs[k].get("at") or 0, k))
+    return job, jobs[job]
+
+
+def schedule_runs_live(registry, name):
+    """The run ids of this schedule's runs that are still live."""
+    return [m["run_id"] for d, m in _schedule_runs(registry, name) if is_live(reap(d))]

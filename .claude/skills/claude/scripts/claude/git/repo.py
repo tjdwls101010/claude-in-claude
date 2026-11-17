@@ -61,3 +61,9 @@ def current_branch(path):
     """The branch checked out at `path`, or None on a detached HEAD or outside a work tree."""
     code, out, _ = run_git(path, "symbolic-ref", "--short", "-q", "HEAD")
     return out.strip() if code == 0 and out.strip() else None
+
+
+def remote_url(path, name="origin"):
+    """The URL of the remote `name` of the repository at `path`, or None."""
+    code, out, _ = run_git(path, "remote", "get-url", name)
+    return out.strip() if code == 0 and out.strip() else None

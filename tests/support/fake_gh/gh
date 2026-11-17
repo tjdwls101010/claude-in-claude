@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""A stand-in for the `gh` CLI, first on PATH in schedule tests. It records every call (argv and stdin) under $FAKE_GH_STATE/calls/ and answers from a small simulated GitHub in $FAKE_GH_STATE/world.json, in the shapes of real `gh` output captured from a private repository (tests/support/fixtures/github/*.json: exit code, stdout and stderr per call, with tokens and emails blanked).
+
+world.json: {"auth": "ok" | "none" | "noscope", "repos": {"owner/name": {"private", "default_branch", "files": {path: {"text", "sha"}}, "workflows": {file: state}, "runners": [{"name", "status", "labels"}]}}, "race": n, "protected": bool}
+  race: the next n Contents PUTs first lose to another `schedule` call, which commits the file as it was (or, for a first create, what this call sends) under another definition id, and get the 409 a real loser got (stage 0 f).
+  protected: a Contents PUT or DELETE gets HTTP 422 as branch protection would (shape of a captured 422; the message is not a capture).
+"""
+
+import base64
+import hashlib
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+STATE = Path(os.environ.get("FAKE_GH_STATE", "/tmp/fake-gh"))
+FIXTURES = Path(os.environ.get("FAKE_GH_FIXTURES", Path(__file__).resolve().parent.parent / "fixtures" / "github"))
+(STATE / "calls").mkdir(parents=True, exist_ok=True)
+stdin = sys.stdin.read() if "--input" in sys.argv else None
+(STATE / "calls" / f"{time.time_ns()}-{os.getpid()}.json").write_text(json.dumps({"argv": sys.argv[1:], "stdin": stdin}))
+world_path = STATE / "world.json"
+world = json.loads(world_path.read_text()) if world_path.exists() else {"auth": "ok", "repos": {}}
+
+
+def save():
+    world_path.write_text(json.dumps(world))
+
+
+def fixture(name):
+    return json.loads((FIXTURES / f"{name}.json").read_text())
+
+
+def answer(_fixture, **patch):
+    """Reply as the captured call `_fixture` did, with JSON fields replaced by `patch` (dotted keys reach into objects)."""
+    f = fixture(_fixture)
+    out = f["stdout"]
+    if patch and out.strip():
+        data = json.loads(out)
+        for key, value in patch.items():
+            target = data
+            *path, last = key.split(".")
+            for p in path:
+                target = target[p]
+            target[last] = value
+        out = json.dumps(data)
+    sys.stdout.write(out)
+    sys.stderr.write(f["stderr"])
+    sys.exit(f["exit"])
+
+
+def error(name, message=None, status=None):
+    f = fixture(name)
+    data = json.loads(f["stdout"])
+    if message is not None:
+        data["message"] = message
+    if status is not None:
+        data["status"] = str(status)
+    sys.stdout.write(json.dumps(data))
+    sys.stderr.write(f"gh: {data['message']} (HTTP {data['status']})\n")
+    sys.exit(1)
+
+
+def sha_of(text):
+    return hashlib.sha1(f"blob {len(text.encode())}\0{text}".encode()).hexdigest()
+
+
+def commit_sha():
+    return hashlib.sha1(str(time.time_ns()).encode()).hexdigest()
+
+
+args = sys.argv[1:]
+if args[:2] == ["auth", "status"]:
+    mode = world.get("auth", "ok")
+    if mode == "none":
+        answer("auth-status-none")
+    f = json.loads(fixture("auth-status")["stdout"])
+    host = f["hosts"]["github.com"][0]
+    host["login"] = "someone"
+    if mode == "noscope":
+        host["scopes"] = "gist, read:org, repo"
+    print(json.dumps(f))
+    sys.exit(0)
+
+if args[:1] == ["workflow"]:
+    print("fake gh: the skill does not call `gh workflow`; the dispatcher plist does", file=sys.stderr)
+    sys.exit(64)
+
+if args[:1] != ["api"]:
+    print(f"fake gh: unsupported {args[:2]}", file=sys.stderr)
+    sys.exit(64)
+
+method = args[args.index("-X") + 1] if "-X" in args else "GET"
+path = next(a for a in args[1:] if not a.startswith("-") and a not in (method, "-"))
+body = json.loads(stdin) if stdin else {}
+path_only = path.split("?", 1)[0]
+m = re.match(r"^repos/([^/]+/[^/]+)(?:/(.*))?$", path_only)
+if not m:
+    print(f"fake gh: unsupported path {path}", file=sys.stderr)
+    sys.exit(64)
+repo_name, rest = m.group(1), m.group(2) or ""
+repo = world["repos"].get(repo_name)
+if repo is None:
+    answer("repo-404")
+
+if rest == "":
+    answer("repo", full_name=repo_name, private=repo.get("private", True), visibility="private" if repo.get("private", True) else "public", default_branch=repo.get("default_branch", "main"))
+
+c = re.match(r"^contents/(.+)$", rest)
+if c:
+    fpath = c.group(1)
+    files = repo.setdefault("files", {})
+    cur = files.get(fpath)
+    name = fpath.rsplit("/", 1)[-1]
+    url = f"https://github.com/{repo_name}/blob/main/{fpath}"
+    if method == "GET":
+        if cur is None:
+            answer("contents-get-404")
+        answer("contents-get", name=name, path=fpath, sha=cur["sha"], content=base64.b64encode(cur["text"].encode()).decode(), html_url=url)
+    if world.get("protected"):
+        error("contents-put-nosha", "Repository rule violations found\n\nChanges must be made through a pull request.", 422)
+    if method == "PUT":
+        text = base64.b64decode(body["content"]).decode()
+        if world.get("race", 0) > 0:
+            world["race"] -= 1
+            # The other call committed what was there (or, for a first create, what this call sends) under its own definition id.
+            other = re.sub(r'(--definition |"definition": ")([0-9a-f]+)', lambda m: m.group(1) + "0th3r0ne", cur["text"] if cur else text)
+            files[fpath] = {"text": other, "sha": sha_of(other)}
+            repo.setdefault("workflows", {})[name] = "active"
+            save()
+            error("race-b", f"is at {sha_of(other)} but expected {body.get('sha') or 'nothing'}")
+        if cur is not None and not body.get("sha"):
+            answer("contents-put-nosha")
+        if cur is not None and body["sha"] != cur["sha"]:
+            error("contents-put-stale", f"{fpath} does not match {body['sha']}")
+        new_sha = sha_of(text)
+        files[fpath] = {"text": text, "sha": new_sha}
+        if fpath.startswith(".github/workflows/"):
+            repo.setdefault("workflows", {}).setdefault(name, "active")
+        save()
+        answer("contents-put-update" if cur else "contents-put-create", **{"content.sha": new_sha, "content.path": fpath, "content.name": name, "content.html_url": url, "commit.sha": commit_sha(), "commit.message": body.get("message")})
+    if method == "DELETE":
+        if cur is None:
+            answer("contents-get-404")
+        if body.get("sha") != cur["sha"]:
+            error("contents-put-stale", f"{fpath} does not match {body.get('sha')}")
+        del files[fpath]
+        repo.get("workflows", {}).pop(name, None)
+        save()
+        answer("contents-delete", **{"commit.sha": commit_sha(), "commit.message": body.get("message")})
+
+w = re.match(r"^actions/workflows/([^/]+)(?:/(enable|disable))?$", rest)
+if w:
+    file, action = w.group(1), w.group(2)
+    states = repo.setdefault("workflows", {})
+    if file not in states:
+        answer("workflow-404")
+    if action:
+        if world.get("fail_disable") and action == "disable":
+            error("workflow-404", "Resource not accessible by integration", 403)
+        states[file] = "active" if action == "enable" else "disabled_manually"
+        save()
+        answer("workflow-enable")
+    answer("workflow-active" if states[file] == "active" else "workflow-disabled", path=f".github/workflows/{file}", state=states[file])
+
+if rest == "actions/workflows":
+    f = json.loads(fixture("workflows-list")["stdout"])
+    template = f["workflows"][0]
+    f["workflows"] = [{**template, "name": file, "path": f".github/workflows/{file}", "state": state} for file, state in sorted(repo.get("workflows", {}).items())]
+    f["total_count"] = len(f["workflows"])
+    print(json.dumps(f))
+    sys.exit(0)
+
+if rest == "actions/runners":
+    f = json.loads(fixture("runners")["stdout"])
+    template = f["runners"][0]
+    f["runners"] = [{**template, "name": r["name"], "status": r.get("status", "online"), "busy": False, "labels": [{"id": 0, "name": l, "type": "read-only"} for l in r.get("labels", ["self-hosted", "macOS", "ARM64"])]} for r in repo.get("runners", [])]
+    f["total_count"] = len(f["runners"])
+    print(json.dumps(f))
+    sys.exit(0)
+
+print(f"fake gh: unsupported {method} {path}", file=sys.stderr)
+sys.exit(64)
