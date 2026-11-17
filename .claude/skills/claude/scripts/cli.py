@@ -25,6 +25,7 @@ from claude.doctor import doctor
 from claude.errors import Refusal
 from claude.observe import GROUP_MESSAGE_CAP, LISTING_ROWS, STALL_SECONDS, log, result, status
 from claude.runs import DEFAULTS, EFFORTS, SEND_LIMIT, resume, send, start, stop, supervise
+from claude.schedule import scheduled_finish, scheduled_run
 
 EXIT_REFUSED, EXIT_ARGUMENTS, EXIT_BLOCKED = 1, 2, 3
 
@@ -154,7 +155,7 @@ class ArgumentError(Exception):
 class Parser(argparse.ArgumentParser):
     def error(self, message):
         name = self.prog.split()[-1] if " " in self.prog else None
-        raise ArgumentError(message, name if name in VISIBLE or name == "__supervise" else None)
+        raise ArgumentError(message, name if name in VISIBLE or name in ("__supervise", "__scheduled") else None)
 
 
 def positive(text):
@@ -255,6 +256,23 @@ def build_parser():
 
     p = sub.add_parser("__supervise", help=argparse.SUPPRESS)
     p.add_argument("--run-dir", required=True)
+
+    # A scheduled job's two steps (K1), written into the workflow by `schedule`; both take the same flags so Finish knows what Run was told. The job's environment carries CLAUDE_SCHEDULE_MODE (run or check), _SOURCE (dispatcher or empty), _PROMPT and _SCHEMA.
+    p = sub.add_parser("__scheduled", help=argparse.SUPPRESS)
+    p.add_argument("step", choices=("run", "finish"))
+    p.add_argument("--name", required=True)
+    p.add_argument("--project", required=True)
+    p.add_argument("--profile", choices=PROFILES, required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--effort", choices=EFFORTS, required=True)
+    p.add_argument("--timeout", type=positive, required=True)
+    when = p.add_mutually_exclusive_group(required=True)
+    when.add_argument("--cron")
+    when.add_argument("--at")
+    p.add_argument("--timezone", required=True)
+    p.add_argument("--worktree", action="store_true")
+    p.add_argument("--workflow")
+    p.add_argument("--definition")
     return root
 
 
@@ -343,6 +361,11 @@ def dispatch(args):
         return 0 if reply["ok"] else EXIT_BLOCKED
     if c == "__supervise":
         return supervise(args.run_dir)
+    if c == "__scheduled":
+        spec = {"name": args.name, "project": args.project, "settings": {"profile": args.profile, "model": args.model, "effort": args.effort, "timeout": args.timeout}, "cron": args.cron, "at": args.at, "timezone": args.timezone, "worktree": args.worktree, "workflow": args.workflow, "definition": args.definition}
+        step = scheduled_run if args.step == "run" else scheduled_finish
+        code = step(spec, dict(os.environ), lambda text: (sys.stdout.write(text), sys.stdout.flush()))
+        return code
     raise Refusal("no command given", arguments=True, help="--help")
 
 

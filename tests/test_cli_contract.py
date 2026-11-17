@@ -26,6 +26,7 @@ class Help(unittest.TestCase):
         for name in COMMANDS:
             self.assertRegex(out, rf"\n\s+{name}\s+\S")
         self.assertNotIn("__supervise", out)
+        self.assertNotIn("__scheduled", out)
         self.assertIn("Exit codes: 0 success; 1", out)
 
     def test_each_command_says_what_it_prints_and_how_it_exits(self):

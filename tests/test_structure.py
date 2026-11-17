@@ -23,15 +23,17 @@ KINDS = {
     "batch": "feature",
     "observe": "feature",
     "doctor": "feature",
+    "schedule": "feature",
     "registry": "store",
     "claude_cli": "system",
     "git": "system",
+    "github": "system",
     "errors": "shared",
     "util": "shared",
 }
 # A unit may import a unit of a lower layer. Features may import each other only along FEATURE_EDGES.
 LAYER = {"feature": 3, "store": 2, "system": 1, "shared": 0}
-FEATURE_EDGES = {("batch", "runs")}
+FEATURE_EDGES = {("batch", "runs"), ("schedule", "runs"), ("schedule", "batch"), ("schedule", "observe")}
 
 
 def unit_of(dotted):

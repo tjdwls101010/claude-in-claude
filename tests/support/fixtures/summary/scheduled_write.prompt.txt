@@ -1,0 +1,8 @@
+Do these steps in order, each as its own tool call, then write a short final report with a "## Probe report" heading and one bullet per step:
+1. Read README.md.
+2. Run the shell command: ls -la .github/workflows
+3. Run the shell command: python3 -c 'import sys; print("checking"); sys.exit(3)'; echo "exit code: $?"
+4. Run the shell command: grep -ril "timezone" .github; echo "grep exit: $?"
+5. Use the Write tool to create /etc/claude-probe-denied.txt containing "x" (this may be refused; just report what happened).
+6. Use the Write tool to create docs/notes.md with three short lines of notes about this repository.
+7. Use the Edit tool to append one line "Probe ran." to the end of README.md.

@@ -128,5 +128,81 @@ class Worktree(unittest.TestCase):
         self.assertFalse(g.branch_exists(str(self.repo), "worktree-g-1"))
 
 
+
+class TreeSnapshot(unittest.TestCase):
+    """What a scheduled run compares before and after the worker (K27): the branch, the commit and every changed or untracked path with its content fingerprint, and line counts against HEAD."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.repo = make_repo(self.root / "repo", {"a.txt": "a\n", "b.txt": "b1\nb2\n"})
+
+    def test_branch_head_and_entries(self):
+        snap = g.status_snapshot(str(self.repo))
+        self.assertEqual((snap["branch"], snap["head"], snap["entries"]), ("main", git(self.repo, "rev-parse", "HEAD"), {}))
+        (self.repo / "a.txt").write_text("a changed\n")
+        (self.repo / "new dir").mkdir()
+        (self.repo / "new dir" / "n.txt").write_text("n\n")
+        (self.repo / ".gitignore").write_text("ignored.txt\n")
+        (self.repo / "ignored.txt").write_text("i\n")
+        (self.repo / ".claude" / "worktrees" / "x").mkdir(parents=True)
+        (self.repo / ".claude" / "worktrees" / "x" / "f").write_text("f\n")
+        snap = g.status_snapshot(str(self.repo))
+        self.assertEqual(sorted(snap["entries"]), [".gitignore", "a.txt", "new dir/n.txt"])
+        self.assertEqual(snap["entries"]["a.txt"]["status"], " M")
+        self.assertEqual(snap["entries"]["new dir/n.txt"]["status"], "??")
+        import hashlib
+
+        self.assertEqual(snap["entries"]["a.txt"]["fingerprint"], ["file", hashlib.sha256(b"a changed\n").hexdigest()])
+        (self.repo / "a.txt").unlink()
+        self.assertEqual(g.status_snapshot(str(self.repo))["entries"]["a.txt"], {"status": " D", "fingerprint": ["missing", None]})
+
+    def test_detached_head_has_no_branch(self):
+        git(self.repo, "checkout", "-q", "--detach")
+        self.assertIsNone(g.current_branch(str(self.repo)))
+        self.assertIsNone(g.status_snapshot(str(self.repo))["branch"])
+        self.assertEqual(g.current_branch(str(self.root / "repo")), None)
+        git(self.repo, "checkout", "-q", "main")
+        self.assertEqual(g.current_branch(str(self.repo)), "main")
+
+    def test_not_a_repository(self):
+        (self.root / "plain").mkdir()
+        self.assertIsNone(g.status_snapshot(str(self.root / "plain")))
+        self.assertIsNone(g.current_branch(str(self.root / "plain")))
+
+    def test_a_project_in_a_subdirectory(self):
+        import hashlib
+
+        (self.repo / "sub").mkdir()
+        (self.repo / "sub" / "x.txt").write_text("one\n")
+        git(self.repo, "add", "sub/x.txt")
+        git(self.repo, "commit", "-q", "-m", "sub")
+        (self.repo / "sub" / "x.txt").write_text("two\n")
+        snap = g.status_snapshot(str(self.repo / "sub"))
+        self.assertEqual(snap["root"], str(self.repo))
+        self.assertEqual(snap["entries"]["sub/x.txt"]["fingerprint"], ["file", hashlib.sha256(b"two\n").hexdigest()])
+        self.assertEqual(g.numstat(str(self.repo / "sub"), ["sub/x.txt"]), {"sub/x.txt": [1, 1]})
+
+    def test_files_committed_between_two_commits(self):
+        base = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "a.txt").write_text("a\nmore\n")
+        (self.repo / "c.txt").write_text("c1\nc2\nc3\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "work")
+        head = git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(g.committed_files(str(self.repo), base, head), [{"status": "M", "path": "a.txt", "lines": [1, 0]}, {"status": "A", "path": "c.txt", "lines": [3, 0]}])
+        self.assertEqual(g.committed_files(str(self.repo), head, head), [])
+
+    def test_numstat_counts_staged_and_unstaged_changes_against_head(self):
+        (self.repo / "a.txt").write_text("a\nmore\n")
+        (self.repo / "b.txt").write_text("b1\n")
+        git(self.repo, "add", "b.txt")
+        self.assertEqual(g.numstat(str(self.repo), ["a.txt", "b.txt"]), {"a.txt": [1, 0], "b.txt": [0, 1]})
+        self.assertEqual(g.numstat(str(self.repo), ["a.txt"]), {"a.txt": [1, 0]})
+        (self.repo / "bin.dat").write_bytes(b"\x00\x01")
+        git(self.repo, "add", "bin.dat")
+        self.assertEqual(g.numstat(str(self.repo), ["bin.dat"]), {"bin.dat": None}, "a binary file has no line counts")
+        self.assertEqual(g.numstat(str(self.repo), []), {})
+
 if __name__ == "__main__":
     unittest.main()
