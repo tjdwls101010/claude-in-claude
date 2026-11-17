@@ -4,6 +4,7 @@ __all__ = [
     "VERSION_FLOOR",
     "VERSION_FLOOR_TEXT",
     "StreamState",
+    "activity_rows",
     "answered_uuids",
     "auth_status",
     "build_argv",
@@ -15,6 +16,7 @@ __all__ = [
     "profile_exceptions",
     "quota",
     "read_events",
+    "render_rows",
     "sandbox_prereqs",
     "summarize",
     "turn_preamble",
@@ -25,5 +27,5 @@ __all__ = [
 ]
 
 from .argv import PROFILES, build_argv, profile_exceptions, turn_preamble, worker_context, worker_env, worktree_location
-from .stream import StreamState, answered_uuids, encode_user_message, final_result, log_lines, read_events, summarize
+from .stream import StreamState, activity_rows, answered_uuids, encode_user_message, final_result, log_lines, read_events, render_rows, summarize
 from .install import VERIFIED_VERSION, VERSION_FLOOR, VERSION_FLOOR_TEXT, auth_status, claude_version, parse_usage, quota, sandbox_prereqs, version_floor_check

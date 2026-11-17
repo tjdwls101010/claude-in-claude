@@ -156,10 +156,14 @@ class StreamState:
         self.pending_info = []  # informational events not yet tied to a uuid: (index, reason, kind)
         self.last_command_uuid = None
         self.lines = []  # (index, kind, payload) for log rendering
+        self.times = {}  # index -> the event's `timestamp`, for the events that carry one (assistant and tool results)
+        self.use_times = {}  # tool_use_id -> the `timestamp` of the event that made the call
 
     def feed(self, e):
         i = self.count
         self.count += 1
+        if isinstance(e.get("timestamp"), str):
+            self.times[i] = e["timestamp"]
         t, st = e.get("type"), e.get("subtype")
         self.last_event_is_retry = t == "system" and st == "api_retry"
         if t == "system" and st == "init":
@@ -213,6 +217,7 @@ class StreamState:
                     continue
                 if b.get("type") == "tool_use":
                     self.uses[b.get("id")] = (b.get("name"), b.get("input"), parent, i)
+                    self.use_times[b.get("id")] = self.times.get(i)
                     if parent:
                         self.subagent_tools[parent] = self.subagent_tools.get(parent, 0) + 1
                     else:
@@ -253,7 +258,7 @@ class StreamState:
             return
         self._denied_ids.add(tool_use_id)
         self.denials.append({"tool": tool, "input": inp, "tool_use_id": tool_use_id})
-        self.lines.append((index, "denied", (tool, inp)))
+        self.lines.append((index, "denied", (tool, inp, tool_use_id)))
 
     def _tie_blocked(self, r):
         """Tie hook-ended messages to uuids: a hook-ended message that opened its own turn gets a `num_turns: 0` result naming it; one that arrived during a turn is the command just before the notice."""
@@ -282,7 +287,7 @@ class StreamState:
         use_result = e.get("tool_use_result")
         if name == "Bash":
             code, out = _bash_output(b, use_result)
-            self.lines.append((i, "bash", (code, out, _tool_summary(name, inp))))
+            self.lines.append((i, "bash", (code, out, _tool_summary(name, inp), tid)))
             return
         if name in EDIT_TOOLS and not is_error:
             path = (inp or {}).get("file_path") or (inp or {}).get("notebook_path")
@@ -366,82 +371,115 @@ def _fail_excerpt(out):
     return trim_bytes(out, FAIL_OUTPUT_BYTES) + "\n…\n" + data[-FAIL_OUTPUT_BYTES:].decode("utf-8", "ignore")
 
 
-def log_lines(events, rel_to=None, messages=()):
-    """The run as text, one line per event that matters: init, messages whole, tool calls in one line each (a failed command's output indented beneath), denials, sent messages, tasks, retries, rate-limit changes, compactions and results, ending with calls still running."""
+TOOL_KINDS = {"Edit": "edit", "NotebookEdit": "edit", "Write": "write", "Read": "read", "Grep": "grep", "Glob": "glob", "WebFetch": "fetch", "WebSearch": "search", "Skill": "skill"}
+
+
+def activity_rows(events, rel_to=None, messages=()):
+    """What the run did as rows, one per event that matters, in order: `init`, `msg` (the whole message), one row per tool call — `bash`, `read`, `edit`, `write`, `grep`, `glob`, `fetch`, `search`, `skill`, `agent`, `mcp`, or `tool` for any other — `denied`, `sent` (a message sent into the run, placed where it was delivered), `task`, `retry`, `ratelimit` (when its status changes), `compact`, `result`, and finally `running` for calls still without a result.
+
+    Every row has `kind`, `index` (its event's position, None for `sent` and `running`) and `time`: for a call (`denied` and `running` included) the ISO timestamp of the event that made it, for a message the event that wrote it, None where that event has none. A tool call's `detail` is its one-line target (a command, a path relative to `rel_to`, a pattern, a URL); `bash` adds `exit` (None when unknown), `bytes` and the whole `output`; the others add `error`."""
     state = StreamState()
     for e in events:
         state.feed(e)
     sent = sorted((m for m in messages if m.get("kind") == "send" and m.get("after_line") is not None), key=lambda m: m["after_line"])
-    out = []
+    rows = []
     si = 0
 
     def flush_sent(upto):
         nonlocal si
         while si < len(sent) and sent[si]["after_line"] <= upto:
             m = sent[si]
-            out.append(f"sent {m.get('priority') or 'next'} {(m.get('head') or '')[:120]}")
+            rows.append({"kind": "sent", "index": None, "time": None, "priority": m.get("priority") or "next", "head": (m.get("head") or "")[:120]})
             si += 1
 
     for index, kind, payload in state.lines:
         flush_sent(index)
+        row = {"kind": kind, "index": index, "time": state.times.get(index)}
         if kind == "init":
-            out.append(f"init model={payload['model']} mode={payload['permission_mode']} cwd={payload['cwd']}")
+            row.update({"model": payload["model"], "mode": payload["permission_mode"], "cwd": payload["cwd"]})
         elif kind == "msg":
-            first, *rest = payload.strip("\n").split("\n")
+            row["text"] = payload
+        elif kind == "bash":
+            code, text, cmd, tid = payload
+            row.update({"time": state.use_times.get(tid), "detail": cmd, "exit": code, "bytes": len(text.encode("utf-8", "replace")), "output": text})
+        elif kind == "tool":
+            name, inp, is_error, text, tid = payload
+            row.update({"time": state.use_times.get(tid), "tool": name, "detail": _tool_summary(name, inp, rel_to), "error": is_error})
+            if name in TOOL_KINDS:
+                row["kind"] = TOOL_KINDS[name]
+            elif name in AGENT_TOOLS:
+                row.update({"kind": "agent", "tools": state.subagent_tools.get(tid, 0), "bytes": len(text.encode("utf-8", "replace"))})
+            elif name and name.startswith("mcp__"):
+                parts = name.split("__")
+                row.update({"kind": "mcp", "server": parts[1] if len(parts) > 1 else "?", "name": "__".join(parts[2:]) or "?"})
+        elif kind == "denied":
+            tool, inp, tid = payload
+            row.update({"time": state.use_times.get(tid), "tool": tool, "input": inp})
+        elif kind == "task":
+            row["status"], row["description"] = payload
+        elif kind == "retry":
+            row.update({k: payload.get(k) for k in ("attempt", "max_retries", "error", "error_status")})
+        elif kind == "ratelimit":
+            row.update({k: payload[k] for k in ("status", "five_hour", "seven_day")})
+        elif kind == "result":
+            row.update({k: payload[k] for k in ("subtype", "num_turns", "terminal_reason", "cost_usd", "origin", "is_error", "duration_ms")})
+        rows.append(row)
+    flush_sent(float("inf"))
+    for p in state.in_progress():
+        rows.append({"kind": "running", "index": None, "time": state.use_times.get(p["tool_use_id"]), "tool": p["tool"], "detail": p["summary"]})
+    return rows
+
+
+def render_rows(rows):
+    """The rows of `activity_rows` as `log` prints them: one line each, a message's further lines and a failed command's output indented beneath."""
+    out = []
+    for row in rows:
+        kind = row["kind"]
+        err = " error" if row.get("error") else ""
+        if kind == "init":
+            out.append(f"init model={row['model']} mode={row['mode']} cwd={row['cwd']}")
+        elif kind == "msg":
+            first, *rest = row["text"].strip("\n").split("\n")
             out.append(f"msg {first}")
             out += ["    " + l if l.strip() else "" for l in rest]
         elif kind == "bash":
-            code, text, cmd = payload
-            nbytes = len(text.encode("utf-8", "replace"))
-            out.append(f"bash exit={'?' if code is None else code} out={nbytes}B {cmd}")
-            if code != 0 and text.strip():
-                out += _indent(_fail_excerpt(text))
+            code = row["exit"]
+            out.append(f"bash exit={'?' if code is None else code} out={row['bytes']}B {row['detail']}")
+            if code != 0 and row["output"].strip():
+                out += _indent(_fail_excerpt(row["output"]))
+        elif kind in ("edit", "write", "read", "grep", "glob", "fetch", "search", "skill"):
+            out.append(f"{kind} {row['detail']}{err}")
+        elif kind == "agent":
+            out.append(f"agent {row['detail']} tools={row['tools']} out={row['bytes']}B{err}")
+        elif kind == "mcp":
+            out.append(f"mcp {row['server']}/{row['name']} {'error' if row['error'] else 'ok'}")
         elif kind == "tool":
-            name, inp, is_error, text, tid = payload
-            summary = _tool_summary(name, inp, rel_to)
-            err = " error" if is_error else ""
-            if name == "Edit" or name == "NotebookEdit":
-                out.append(f"edit {summary}{err}")
-            elif name == "Write":
-                out.append(f"write {summary}{err}")
-            elif name == "Read":
-                out.append(f"read {summary}{err}")
-            elif name in ("Grep", "Glob"):
-                out.append(f"{name.lower()} {summary}{err}")
-            elif name == "WebFetch":
-                out.append(f"fetch {summary}{err}")
-            elif name == "WebSearch":
-                out.append(f"search {summary}{err}")
-            elif name == "Skill":
-                out.append(f"skill {summary}{err}")
-            elif name in AGENT_TOOLS:
-                out.append(f"agent {summary} tools={state.subagent_tools.get(tid, 0)} out={len(text.encode('utf-8', 'replace'))}B{err}")
-            elif name and name.startswith("mcp__"):
-                parts = name.split("__")
-                out.append(f"mcp {parts[1] if len(parts) > 1 else '?'}/{'__'.join(parts[2:]) or '?'} {'error' if is_error else 'ok'}")
-            else:
-                out.append(f"tool {name} {summary}{err}")
+            out.append(f"tool {row['tool']} {row['detail']}{err}")
         elif kind == "denied":
-            tool, inp = payload
-            out.append(f"denied {tool} {inp}".rstrip())
+            out.append(f"denied {row['tool']} {row['input']}".rstrip())
+        elif kind == "sent":
+            out.append(f"sent {row['priority']} {row['head']}")
         elif kind == "task":
-            status, desc = payload
-            out.append(f"task {status} {desc or ''}".rstrip())
+            out.append(f"task {row['status']} {row['description'] or ''}".rstrip())
         elif kind == "retry":
-            out.append(f"retry attempt={payload.get('attempt')}/{payload.get('max_retries')} error={payload.get('error')} status={payload.get('error_status')}")
+            out.append(f"retry attempt={row['attempt']}/{row['max_retries']} error={row['error']} status={row['error_status']}")
         elif kind == "ratelimit":
-            out.append(f"ratelimit {payload['status']} 5h={_pct(payload['five_hour'])} 7d={_pct(payload['seven_day'])}")
+            out.append(f"ratelimit {row['status']} 5h={_pct(row['five_hour'])} 7d={_pct(row['seven_day'])}")
         elif kind == "compact":
             out.append("compact")
         elif kind == "result":
-            line = f"result {payload['subtype']} turns={payload['num_turns']} terminal={payload['terminal_reason'] or '-'} cost={_cost(payload['cost_usd'])}"
-            if payload["origin"] == FOLLOWUP_ORIGIN:
+            line = f"result {row['subtype']} turns={row['num_turns']} terminal={row['terminal_reason'] or '-'} cost={_cost(row['cost_usd'])}"
+            if row["origin"] == FOLLOWUP_ORIGIN:
                 line += f" origin={FOLLOWUP_ORIGIN}"
             out.append(line)
-    flush_sent(float("inf"))
-    for p in state.in_progress():
-        out.append(f"running {p['tool']} {p['summary']}".rstrip())
+        elif kind == "running":
+            out.append(f"running {row['tool']} {row['detail']}".rstrip())
     return out
+
+
+def log_lines(events, rel_to=None, messages=()):
+    """The run as text, one line per event that matters: init, messages whole, tool calls in one line each (a failed command's output indented beneath), denials, sent messages, tasks, retries, rate-limit changes, compactions and results, ending with calls still running."""
+    return render_rows(activity_rows(events, rel_to, messages))
 
 
 def _head(m):

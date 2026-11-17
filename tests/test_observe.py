@@ -6,7 +6,7 @@ import json
 import time
 import unittest
 
-from support.harness import FIXTURES, Sandbox, engine
+from support.harness import FAST_TIMINGS, FIXTURES, Sandbox, engine
 
 observe = engine("claude.observe")
 cli_unit = engine("claude.claude_cli")
@@ -169,3 +169,16 @@ class StatusAndLog(Sandbox):
         self.assertEqual(out[i + 1 : i + 3], ["    FAIL: test_x", "    assert 1 == 2"])
         self.assertIn("msg done", out)
         self.assertEqual(out[-1], f"run={reply['run_id']} state=completed")
+
+
+class WaitEnded(Sandbox):
+    def test_a_continuing_stall_is_reported_once_and_the_end_is_returned(self):
+        import os
+        from unittest import mock
+
+        reply = self.start("x [[fake:silent:10]]")
+        calls = []
+        with mock.patch.dict(os.environ, {"CLAUDE_SKILL_TEST_TIMINGS": json.dumps(FAST_TIMINGS)}):
+            snap = observe.wait_ended(cwd=str(self.project), ref=reply["run_id"], on_attention=lambda items: calls.append([a["reason"] for a in items]))
+        self.assertEqual(snap["meta"]["state"], "completed")
+        self.assertEqual(calls, [["stalled"]], "one stall that lasts several stall intervals is one attention")
