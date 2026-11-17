@@ -1,6 +1,6 @@
 ---
 name: claude
-description: "Start headless Claude Code workers (claude -p sessions) in the background and manage them like subagents: a handle at once, progress you can read, steering a running worker with send, stopping and resuming it, several workers as one group, waiting for and collecting text or JSON-schema results, and checking usage limits. Use when work should go to another Claude session you can watch, steer and collect, when several Claude workers should run in parallel, or when a long task should run while you do something else. Triggers include: claude worker, headless claude, claude -p worker, background claude, 클로드 작업자, 클로드한테 시켜, 클로드로 병렬, 백그라운드 클로드, 작업자 띄워. Not for questions about Claude Code features, the built-in Agent tool, agent teams or claude --bg themselves, or the Claude API and SDK."
+description: "Start headless Claude Code workers (claude -p sessions) in the background and manage them like subagents: a handle at once, progress you can read, steering with send, stopping and resuming it, several workers as one group, waiting for and collecting text or JSON-schema results, checking usage limits, and scheduling a worker to run later or recurringly on this Mac, with GitHub Actions as its record. Use when work should go to another Claude session you can watch, steer and collect, when several Claude workers should run in parallel, when a long task should run while you do something else, or unattended at a set time. Triggers include: claude worker, headless claude, claude -p worker, background claude, schedule a claude worker, scheduled claude, 클로드 작업자, 클로드한테 시켜, 클로드로 병렬, 백그라운드 클로드, 작업자 띄워, 예약 작업자, 매일 ~시에 돌려, 정기 실행. Not for questions about Claude Code features, the built-in Agent tool, agent teams, claude --bg, Claude Code's own cloud or Desktop scheduled tasks or /loop, or the Claude API and SDK."
 allowed-tools: Bash(uv run "${CLAUDE_SKILL_DIR}/scripts/cli.py" *)
 ---
 
@@ -27,6 +27,7 @@ Call it as `uv run "${CLAUDE_SKILL_DIR}/scripts/cli.py" <command> …`, written 
 | a word to a running subagent | `send`; `--interrupt` ends its current turn | — |
 | stopping one | `stop` | — |
 | teammates messaging each other, a shared task list | — | run rounds: `batch`, collect, then resume each member with the others' findings |
+| a scheduled or recurring agent | `schedule` (runs here, through this repository's runner) | — |
 
 ## Several workers at once
 
@@ -42,9 +43,22 @@ A batch is for when N workers should be one name you watch, collect and stop. **
 
 **If this is your only turn**, run `next.command` in the foreground with `--wait-timeout` added and the Bash call's timeout above it; if the budget runs out first, hand back the run id and say the work is unfinished.
 
+## Scheduling a worker
+
+**Nobody is there when it runs**, and every run draws on your subscription's limits. The profile and `--timeout` are its only bounds, so the prompt has to say on its own what to look at, what counts as done and what the answer should hold; the answer becomes the run's summary on GitHub.
+
+**`schedule` changes things outside this conversation that outlive it**: a commit to the repository's default branch without a pull request, and a LaunchAgent on this Mac. Whatever the prompt holds stays in git history after `unschedule` and is published with every run to whoever can read the repository's Actions. A public repository shows that to anyone and lets anyone's pull request run code on this Mac, so `--public-ok` is the repository owner's call.
+
+**Only a check run proves a schedule will run.** Jobs run in the runner's service, not your login session, so `doctor` here cannot see whether the service can read the Claude login; the reply's `next` is the check. Where the reply's `runner.problems` gives more than one fix, such as how the service gets the login, the choice is the Mac owner's.
+
+**The worker sees the checkout as it is when the job starts it**: not as it was at the scheduled time, and not the commit GitHub shows for the run. `--worktree` gives each run its own checkout; taking its changes is yours.
+
+**Afterwards it is a run like any other**: `status`, `log`, `result` and `resume` work on it, and the summary's *Continue on your Mac* gives the calls.
+
 ## When something goes wrong
 
 - `doctor` checks the environment without starting a worker. A run that fails says why in `status --run <id>` (`error`, `stderr_tail`).
 - `mode_mismatch` means the worker did not start in its profile's permission mode (auto on a model without auto mode): treat what it may do as unknown.
 - To look inside a worker's session yourself, once it has ended: `claude --resume <session_id>` in its directory.
+- A scheduled run that ends red says why in its summary's first alert, or, when there is no summary, in the job's step log. `Not logged in` there is the runner's service, not the worker: `doctor`'s `schedule.runners.problems` says what to change.
 - If the command itself is not found: without `uv` nothing here runs, and installing it is the fix; with `uv`, the skill's path did not resolve: `ls "${CLAUDE_SKILL_DIR}/scripts"`.
