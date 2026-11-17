@@ -157,7 +157,9 @@ def schedule(*, name, flags, cwd, dry_run=False, public_ok=False, message=None):
                 except GitHubError as e:
                     if not e.conflict or attempt == 2:
                         if e.status is None:
-                            raise Refusal(f"the commit to {branch} got no answer from GitHub: {e.message}", instead="whether GitHub committed it is unknown; run the same command again once gh reaches GitHub — it finds the workflow committed or not, and installs the dispatcher")
+                            # GitHub may hold the new definition now: no job started from the old one may match this Mac's record any more (K8).
+                            write_definition(registry, name, None)
+                            raise Refusal(f"the commit to {branch} got no answer from GitHub: {e.message}", instead="whether GitHub committed it is unknown; run the same command again once gh reaches GitHub (with a later --at if a one-off's time has passed) — it finds the workflow committed or not, and installs the dispatcher")
                         raise Refusal(f"GitHub refused the commit to {branch} (HTTP {e.status}): {e.message}", instead="`schedule … --dry-run` prints the workflow file; commit it through a pull request, then call `schedule` again to install the dispatcher")
                     # Another call committed first: merge onto what it committed and try once more (K12).
                     current, recorded = _existing(repo, file, branch)
@@ -178,7 +180,9 @@ def schedule(*, name, flags, cwd, dry_run=False, public_ok=False, message=None):
         if dispatcher["status"] != "installed":
             warnings.append("the dispatcher was not installed, so only GitHub's backup cron starts this schedule, often late; run the same command again")
         write_definition(registry, name, spec["definition"])
-    if spec.get("at"):
+    if spec.get("at") and not fire_times(spec, clock(), 1):
+        warnings.append(f"the one-off time {spec['at']} passed while scheduling, so neither the dispatcher nor GitHub will start it until next year, when it is skipped; `schedule --name {name} --at <later>` sets a new time")
+    elif spec.get("at"):
         warnings.append("GitHub's own cron can run a one-off hours late or not at all; the dispatcher on this Mac starts it on time while the Mac is awake (on wake if it slept), and the run disables its workflow afterwards")
     return {
         "name": name,

@@ -334,6 +334,13 @@ class Refusals(Scheduling):
         self.assertNotIn("pull request", reply.get("instead") or "")
         self.assertNotIn("nothing was written", reply.get("instead") or "", "a request that got no answer may still have been committed")
 
+    def test_a_lost_answer_clears_this_macs_definition(self):
+        self.new()
+        self.assertIsNotNone(self.definition())
+        self.world(offline=True)
+        self.new("--profile", "write", expect=1)
+        self.assertIsNone(self.definition(), "a one-off job started from the old definition must not match whatever GitHub may now hold")
+
     def test_inside_a_worker(self):
         reply = self.cli_json("schedule", "--name", "nightly", "x", "--cron", "0 3 * * *", "--profile", "read-only", expect=1, env={"CLAUDE_SKILL_RUN": "r1"})
         self.assertIn("inside worker run", reply["error"])
