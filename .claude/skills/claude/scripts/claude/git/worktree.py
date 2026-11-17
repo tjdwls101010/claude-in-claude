@@ -8,7 +8,7 @@ from pathlib import Path
 
 from claude.util import nfc
 
-from .repo import run_git
+from .repo import current_branch, head_commit, run_git
 
 
 def worktree_entries(repo):
@@ -159,3 +159,40 @@ def detached_commits(repo, path, branch):
 def branch_exists(repo, branch):
     code, _, _ = run_git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}")
     return code == 0
+
+
+def status_snapshot(path):
+    """The checkout at `path` as a scheduled run compares it before and after its worker (K27): `branch` (None when detached), `head`, and `entries`, every changed or untracked path — ignored files and .claude/worktrees left out — with its two-letter `status` and the `fingerprint` of what is there now. None outside a work tree."""
+    code, out, _ = run_git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".", ":(exclude).claude/worktrees")
+    if code != 0:
+        return None
+    entries = {}
+    parts = out.split("\0")
+    i = 0
+    while i < len(parts):
+        item = parts[i]
+        i += 1
+        if len(item) < 4:
+            continue
+        xy, rel = item[:2], nfc(item[3:])
+        if xy[0] in "RC":
+            i += 1  # the rename's source follows as its own field
+        entries[rel] = {"status": xy, "fingerprint": fingerprint(Path(path) / rel)}
+    return {"branch": current_branch(path), "head": head_commit(path), "entries": entries}
+
+
+def numstat(path, paths):
+    """Lines added and deleted against HEAD, staged and unstaged together, for each of `paths` git reports: `{path: [added, deleted]}`, or None for a binary file."""
+    if not paths:
+        return {}
+    code, out, _ = run_git(path, "diff", "HEAD", "--numstat", "-z", "--no-renames", "--", *paths)
+    if code != 0:
+        return {}
+    result = {}
+    for item in out.split("\0"):
+        fields = item.split("\t", 2)
+        if len(fields) != 3:
+            continue
+        added, deleted, rel = fields
+        result[nfc(rel)] = None if added == "-" else [int(added), int(deleted)]
+    return result

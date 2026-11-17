@@ -54,3 +54,10 @@ def uncommitted_count(path):
     if code != 0:
         return None
     return sum(1 for l in out.splitlines() if l.strip())
+
+
+
+def current_branch(path):
+    """The branch checked out at `path`, or None on a detached HEAD or outside a work tree."""
+    code, out, _ = run_git(path, "symbolic-ref", "--short", "-q", "HEAD")
+    return out.strip() if code == 0 and out.strip() else None
