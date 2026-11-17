@@ -173,6 +173,13 @@ class Rendered(unittest.TestCase):
         self.assertEqual(text.count("<details"), text.count("</details>"))
         self.assertIn("<b>Continue on your Mac</b>", text)
 
+    def test_a_long_list_of_edited_files_outside_git_fits(self):
+        edited = ["/work/project/" + "f" * 960 + f"{n:04d}" for n in range(1000)]
+        text = schedule.render_summary(self.run_dir(), self.context(changes={"where": "the project directory", "not_git": edited, "files": []}))
+        self.assertLess(len(text.encode()), 900_000)
+        self.assertEqual(text.count("<details"), text.count("</details>"))
+        self.assertIn("<b>Continue on your Mac</b>", text)
+
     def test_table_rows_escape_pipes_in_branch_names(self):
         text = schedule.render_summary(self.run_dir(), self.context(tree={"kind": "checkout", "branch": "fix|x", "head": "abc1234", "uncommitted_before": 0}))
         row = next(l for l in text.splitlines() if l.startswith("| **Local tree**"))

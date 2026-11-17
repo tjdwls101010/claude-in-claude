@@ -307,7 +307,15 @@ def _changes(snapshot, context):
     if moved:
         body.append(f"HEAD moved during the run: {_code(moved['from'])} → {_code(moved['to'])}" + (f", {moved['commits']} commit{'s' if moved['commits'] != 1 else ''}." if moved["commits"] else ", no new commit."))
     if ch.get("not_git"):
-        body = ["Not a git checkout, so only what the edit tools wrote is known; files a shell command wrote are not here:", "\n".join(f"- {_code(p)}" for p in ch["not_git"]) or "- none"]
+        edited, listed, used = ch["not_git"], [], 0
+        for path in edited[: _limit(context, "change_rows", CHANGE_ROWS)]:
+            if used > CHANGE_BYTES:
+                break
+            listed.append(f"- {_code(path)}")
+            used += len(listed[-1].encode("utf-8"))
+        if len(edited) > len(listed):
+            listed.append(f"- … and {len(edited) - len(listed)} more")
+        body = ["Not a git checkout, so only what the edit tools wrote is known; files a shell command wrote are not here:", "\n".join(listed) or "- none"]
     if ch.get("kept"):
         k = ch["kept"]
         body.append(f"The worktree is kept because it holds these changes: {_code(k['path'])} on branch {_code(k['branch'])}. Move what you need into your tree, then `{k['clean']}`.")
