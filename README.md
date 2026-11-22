@@ -79,7 +79,7 @@ Every command prints one JSON line (or text, where its `--help` says so); `uv ru
 A worker can also run unattended at a set time — every night, every Monday, or once tomorrow — on this Mac, with GitHub Actions as its record and controls.
 
 ```
-schedule ──▶ GitHub API ──▶ .github/workflows/claude-NAME.yml on the default branch   (the definition; GitHub's cron is a late backup)
+schedule ──▶ GitHub API ──▶ .github/workflows/NAME.yml on the default branch   (the definition; GitHub's cron is a late backup)
          └─▶ launchctl  ──▶ ~/Library/LaunchAgents/claude-schedule.OWNER-REPO.NAME.plist   (starts the workflow on time)
 
 on time:  LaunchAgent ── gh workflow run ──▶ GitHub ──▶ this repository's self-hosted runner (this Mac)
@@ -98,11 +98,14 @@ A first schedule, by hand:
 
 ```bash
 uv run "$CLI" schedule --name nightly-review "Review yesterday's commits on main and report what looks risky, with file and line." --cron "0 3 * * *" --profile read-only
-gh workflow run claude-nightly-review.yml -f mode=check     # the reply's `next`: proves the runner can start a worker
-gh workflow run claude-nightly-review.yml                   # a run now, without waiting for 03:00
+gh workflow run nightly-review.yml -f mode=check     # the reply's `next`: proves the runner can start a worker
+gh workflow run nightly-review.yml                   # a run now, without waiting for 03:00
 uv run "$CLI" schedule --list
 uv run "$CLI" unschedule --name nightly-review
+uv run "$CLI" schedule --name 270225_NVDA_Q4 "Read NVDA's Q4 results and update notes/NVDA.md." --at 2027-02-25T09:00 --profile write --worktree
 ```
+
+`--name` is used as given for the workflow file and for its title in Actions, so the second schedule is `270225_NVDA_Q4.yml` there.
 
 Times are in this Mac's time zone. Each run's page on GitHub shows a summary: the outcome, the trigger and the tree the worker saw, alerts (failures, denied tool calls), the prompt, the worker's answer, what changed, its activity (trimmed when long), and the commands to continue the session on your Mac; the run is also in `.claude-runs/` like any other, so `status`, `log`, `result` and `resume` work on it. `--at YYYY-MM-DDTHH:MM` runs once and then turns its workflow off. `--worktree` gives each writing run its own checkout of your local HEAD. Pausing is disabling the workflow (`gh workflow disable`); re-running and cancelling are GitHub's too.
 

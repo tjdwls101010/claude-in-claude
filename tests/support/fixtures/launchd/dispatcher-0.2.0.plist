@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>claude-schedule.tjdwls101010-claude-schedule-probe.nightly</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/gh</string>
+		<string>workflow</string>
+		<string>run</string>
+		<string>claude-nightly.yml</string>
+		<string>--repo</string>
+		<string>tjdwls101010/claude-schedule-probe</string>
+		<string>--ref</string>
+		<string>main</string>
+		<string>-f</string>
+		<string>source=dispatcher</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/Users/someone/Library/Logs/claude-schedule/tjdwls101010-claude-schedule-probe.nightly.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/someone/Library/Logs/claude-schedule/tjdwls101010-claude-schedule-probe.nightly.log</string>
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict>
+			<key>Hour</key>
+			<integer>3</integer>
+			<key>Minute</key>
+			<integer>0</integer>
+		</dict>
+	</array>
+</dict>
+</plist>

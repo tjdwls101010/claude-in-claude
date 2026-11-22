@@ -2,11 +2,14 @@
 """A stand-in for the `gh` CLI, first on PATH in schedule tests. It records every call (argv and stdin) under $FAKE_GH_STATE/calls/ and answers from a small simulated GitHub in $FAKE_GH_STATE/world.json, in the shapes of real `gh` output captured from a private repository (tests/support/fixtures/github/*.json: exit code, stdout and stderr per call, with tokens and emails blanked).
 
 world.json: {"auth": "ok" | "none" | "noscope", "repos": {"owner/name": {"private", "default_branch", "files": {path: {"text", "sha"}}, "workflows": {file: state}, "runners": [{"name", "status", "labels"}]}}, "race": n, "race_cron": expr, "protected": bool}
+  A file may carry "graphql": "none" or "truncated": the GraphQL listing then gives its entry no text (the schema's answer for a binary blob; not captured) or a cut one marked `isTruncated`, while the Contents API still returns it whole.
   Repositories are found whatever the case of the owner and name, and answer with the key's spelling as `full_name`, as GitHub does.
   race: the next n Contents PUTs first lose to another `schedule` call, which commits the file as it was (or, for a first create, what this call sends) under another definition id — and with `race_cron`, another cron — and get the 409 a real loser got (stage 0 f).
   protected: a Contents PUT or DELETE gets the 409 a protected branch answered (captured).
   offline: a Contents PUT fails as gh does without a network: a message on stderr, no HTTP status.
   slow: every call first sleeps this many seconds.
+
+An API path is read as gh reads it (Go's net/url; each case captured on a private repository): a `#` starts a fragment that is dropped, the first `?` the query, and every path component and query value is percent-decoded once — so a raw `a#b.yml` names `a` — while an escape that is not two hex digits fails before any request. A Contents GET whose `ref` is not the default branch gets the 404 a missing ref got.
 """
 
 import base64
@@ -17,6 +20,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from urllib.parse import unquote
 
 STATE = Path(os.environ.get("FAKE_GH_STATE", "/tmp/fake-gh"))
 FIXTURES = Path(os.environ.get("FAKE_GH_FIXTURES", Path(__file__).resolve().parent.parent / "fixtures" / "github"))
@@ -107,7 +111,11 @@ if args[:2] == ["workflow", "run"]:
     runs = world.setdefault("runs", [])
     run_id = 44000000000 + len(runs) + 1
     fields = dict(args[i + 1].split("=", 1) for i, a in enumerate(args) if a == "-f" and i + 1 < len(args))
-    runs.append({"databaseId": run_id, "workflowName": file, "displayTitle": f"{file[len('claude-'):-len('.yml')]} · {fields.get('mode') == 'check' and 'check' or fields.get('source') or 'workflow_dispatch'}", "event": "workflow_dispatch", "status": "completed", "conclusion": "success", "createdAt": "2026-11-17T06:00:00Z", "url": f"https://github.com/{canonical}/actions/runs/{run_id}"})
+    # The run's title is the workflow's `run-name`: the schedule's name (a quoted string, or bare as 0.2.0 wrote it), then what started it.
+    text = (world["repos"][canonical].get("files", {}).get(f".github/workflows/{file}") or {}).get("text", "")
+    quoted, bare = re.search(r'^run-name: "(.*) · \$\{\{', text, re.M), re.search(r"^run-name: (.*) · \$\{\{", text, re.M)
+    title = json.loads(f'"{quoted.group(1)}"') if quoted else bare.group(1) if bare else file.rsplit(".", 1)[0]
+    runs.append({"databaseId": run_id, "workflowName": file, "displayTitle": f"{title} · {fields.get('mode') == 'check' and 'check' or fields.get('source') or 'workflow_dispatch'}", "event": "workflow_dispatch", "status": "completed", "conclusion": "success", "createdAt": "2026-11-17T06:00:00Z", "url": f"https://github.com/{canonical}/actions/runs/{run_id}"})
     save()
     print(f"https://github.com/{canonical}/actions/runs/{run_id}")
     sys.exit(0)
@@ -141,15 +149,45 @@ if args[:1] != ["api"]:
     print(f"fake gh: unsupported {args[:2]}", file=sys.stderr)
     sys.exit(64)
 
+if args[1:2] == ["graphql"]:
+    # The one query the skill sends: the workflow directory's tree on a branch, with each blob's text (captured: graphql-workflows*.json, graphql-repo-404.json).
+    variables = json.loads(stdin)["variables"]
+    wanted = f"{variables['owner']}/{variables['name']}"
+    canonical = next((k for k in world["repos"] if k.lower() == wanted.lower()), None)
+    if canonical is None:
+        answer("graphql-repo-404")
+    repo = world["repos"][canonical]
+    branch, _, directory = variables["e"].partition(":")
+    entries = {}
+    for fpath, f in repo.get("files", {}).items():
+        if branch != repo.get("default_branch", "main") or not fpath.startswith(directory + "/"):
+            continue
+        name, _, deeper = fpath[len(directory) + 1 :].partition("/")
+        if deeper:
+            entries[name] = {"name": name, "type": "tree", "object": {}}
+        else:
+            how = f.get("graphql")
+            text = None if how == "none" else f["text"][: len(f["text"]) // 2] if how == "truncated" else f["text"]
+            entries[name] = {"name": name, "type": "blob", "object": {"byteSize": len(f["text"].encode()), "isTruncated": how == "truncated", "text": text}}
+    if not entries:
+        answer("graphql-workflows-nodir")
+    print(json.dumps({"data": {"repository": {"object": {"entries": [entries[k] for k in sorted(entries)]}}}}))
+    sys.exit(0)
+
 method = args[args.index("-X") + 1] if "-X" in args else "GET"
 path = next(a for a in args[1:] if not a.startswith("-") and a not in (method, "-"))
 body = json.loads(stdin) if stdin else {}
-path_only = path.split("?", 1)[0]
+bad = re.search(r"%(?![0-9A-Fa-f]{2}).{0,2}", path)
+if bad:
+    print(f'parse "https://api.github.com/{path}": invalid URL escape "{bad.group(0)}"', file=sys.stderr)
+    sys.exit(1)
+path_only, _, query_text = path.split("#", 1)[0].partition("?")
+query = {k: unquote(v) for k, _, v in (q.partition("=") for q in query_text.split("&") if q)}
 m = re.match(r"^repos/([^/]+/[^/]+)(?:/(.*))?$", path_only)
 if not m:
     print(f"fake gh: unsupported path {path}", file=sys.stderr)
     sys.exit(64)
-repo_name, rest = m.group(1), m.group(2) or ""
+repo_name, rest = m.group(1), "/".join(unquote(part) for part in (m.group(2) or "").split("/"))
 canonical = next((k for k in world["repos"] if k.lower() == repo_name.lower()), None)
 repo = world["repos"].get(canonical) if canonical else None
 if repo is None:
@@ -167,6 +205,10 @@ if c:
     name = fpath.rsplit("/", 1)[-1]
     url = f"https://github.com/{repo_name}/blob/main/{fpath}"
     if method == "GET":
+        if query.get("ref", repo.get("default_branch", "main")) != repo.get("default_branch", "main"):
+            error("contents-get-noref", f"No commit found for the ref {query['ref']}")
+        if cur is None and any(k.startswith(fpath + "/") for k in files):
+            answer("contents-dir")  # a directory answers with a list of its entries
         if cur is None:
             answer("contents-get-404")
         answer("contents-get", name=name, path=fpath, sha=cur["sha"], content=base64.b64encode(cur["text"].encode()).decode(), html_url=url)
@@ -228,7 +270,6 @@ if w:
 if rest == "actions/workflows":
     f = json.loads(fixture("workflows-list")["stdout"])
     template = f["workflows"][0]
-    query = dict(q.split("=", 1) for q in (path.split("?", 1)[1].split("&") if "?" in path else []))
     per, page = int(query.get("per_page", 30)), int(query.get("page", 1))
     every = [{**template, "name": file, "path": f".github/workflows/{file}", "state": state} for file, state in sorted(repo.get("workflows", {}).items())]
     f["workflows"] = every[(page - 1) * per : page * per]

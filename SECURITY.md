@@ -10,7 +10,7 @@ Reports of particular interest:
 - **`stop` or `clean` acting on something they do not own** — signalling a process group that is not the run's claude, or removing a worktree or branch that holds work.
 - **Registry tampering** — `.claude-runs/` content steering a later command (a printed command, a signal, a removal) somewhere it should not go.
 - **Command injection** in how `scripts/cli.py` builds the worker's argv or the commands it prints.
-- **A schedule doing more than its reply says** — `schedule` or `unschedule` writing a file other than `.github/workflows/claude-NAME.yml` or a LaunchAgent other than `claude-schedule.OWNER-REPO.NAME`, a prompt or path reaching the workflow as something other than text, or a scheduled worker holding the job's token or file commands.
+- **A schedule doing more than its reply says** — `schedule` or `unschedule` writing a file other than `.github/workflows/NAME.yml` (`claude-NAME.yml` for a schedule 0.2.0 committed) or a LaunchAgent other than `claude-schedule.OWNER-REPO.NAME`, a prompt or path reaching the workflow as something other than text, or a scheduled worker holding the job's token or file commands.
 
 ## What to Include
 

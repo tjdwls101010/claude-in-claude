@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import shlex
 import shutil
 import threading
 import time
@@ -20,15 +21,15 @@ from claude.batch import batch, clean
 from claude.claude_cli import auth_status, claude_version, render_rows, sandbox_prereqs, version_floor_check
 from claude.errors import Refusal
 from claude.git import commits_beyond, committed_files, head_commit, numstat, status_snapshot, toplevel
-from claude.github import JOB_HANDLES, GitHubError, annotation, job_context, resume_commands, set_workflow_enabled, stop_commands, workflow_file, write_output, write_summary
+from claude.github import JOB_HANDLES, GitHubError, annotation, job_context, legacy_workflow_file, resume_commands, set_workflow_enabled, stop_commands, write_output, write_summary
 from claude.launchd import remove_agent
 from claude.observe import snapshot, wait_ended
 from claude.registry import claim_slot, claude_alive, find_by_origin_job, group_view, is_live, list_groups, read_definition, read_job, reap, record_job, resolve_runs_dir, schedule_dir, schedule_lock, update_job
 from claude.runs import start, stop
 from claude.util import entry_path, invocation
 
-from .spec import dispatcher_label
-from .summary import render_summary
+from .spec import dispatcher_holder, dispatcher_label, holder_words, worktree_group
+from .summary import code_span, render_summary
 from .times import current_slot
 
 # A one-off's automatic triggers more than this after its time do nothing: GitHub drops a queued job after 24 hours, and a cron without a year would otherwise fire again a year later (K4).
@@ -113,18 +114,17 @@ def _scrub_worker_env():
             del os.environ[key]
 
 
-def _start_worker(spec, prompt, schema_path, registry, ctx, origin):
-    """Start the worker as `start` would, or as a one-member `batch --worktree` group (K10). Returns (run_id, group, refusal)."""
+def _start_worker(spec, prompt, schema_path, registry, group, origin):
+    """Start the worker as `start` would, or — given a `group` — as that one-member `batch --worktree` group (K10). Returns (run_id, refusal)."""
     s = spec["settings"]
-    if spec.get("worktree"):
-        group = f"{spec['name']}-{ctx['run_id']}-{ctx['attempt']}"
+    if group:
         reply = batch(name=group, task_args=[prompt], tasks_file=None, defaults={"profile": s["profile"], "model": s["model"], "effort": s["effort"], "schema": schema_path, "timeout": s["timeout"], "cwd": None}, cwd=spec["project"], use_worktrees=True, runs_dir=registry, origin=origin)
         member = (reply.get("runs") or [{}])[0]
         if not member.get("run_id"):
-            return None, group, member.get("error") or "the worktree member did not start"
-        return member["run_id"], group, None
+            return None, member.get("error") or "the worktree member did not start"
+        return member["run_id"], None
     reply = start(prompt=prompt, cwd=spec["project"], flags={"profile": s["profile"], "model": s["model"], "effort": s["effort"], "schema": schema_path, "cwd": spec["project"]}, label=spec["name"], timeout=s["timeout"], runs_dir=registry, origin=origin)
-    return reply["run_id"], None, None
+    return reply["run_id"], None
 
 
 def _follow(run_id, registry, step, stop_event):
@@ -155,7 +155,7 @@ def scheduled_run(spec, env, write):
     project = spec["project"]
     if not Path(project).is_dir():
         # K23: nothing is written, since the registry would be created at a path that no longer exists.
-        step.command(annotation("error", f"{name}: project missing", f"{project} is not a directory on this runner; if the project moved, run `schedule --name {name} --project <new path>` again"))
+        step.command(annotation("error", f"{name}: project missing", f"{project} is not a directory on this runner; if the project moved, run `schedule --name {shlex.quote(name)} --project <new path>` again"))
         return 1
     registry = resolve_runs_dir(project)
     job = ctx["job"]
@@ -171,8 +171,8 @@ def scheduled_run(spec, env, write):
 
     trigger = trigger_of(ctx, env.get("CLAUDE_SCHEDULE_SOURCE") or "")
     s = spec["settings"]
-    worktree_group = f"{name}-{ctx['run_id']}-{ctx['attempt']}" if spec.get("worktree") else None
-    entry = {"trigger": trigger, "mode": "run", "profile": s["profile"], "url": ctx["url"], "attempt": ctx["attempt"], "group": worktree_group, "tree_before": None if spec.get("worktree") else status_snapshot(project), "outcome": None}
+    group = worktree_group(name, ctx["run_id"], ctx["attempt"]) if spec.get("worktree") else None
+    entry = {"trigger": trigger, "mode": "run", "profile": s["profile"], "url": ctx["url"], "attempt": ctx["attempt"], "group": group, "tree_before": None if spec.get("worktree") else status_snapshot(project), "outcome": None}
     slot = retry_of = None
     if trigger in AUTOMATIC:
         now = clock()
@@ -213,9 +213,9 @@ def scheduled_run(spec, env, write):
         origin["retry_of"] = retry_of["job"]
     _scrub_worker_env()
     try:
-        run_id, group, refused = _start_worker(spec, prompt, schema_path, registry, ctx, origin)
+        run_id, refused = _start_worker(spec, prompt, schema_path, registry, group, origin)
     except Refusal as e:
-        run_id, group, refused = None, worktree_group, e.message
+        run_id, refused = None, e.message
     if refused:
         update_job(registry, name, job, {"outcome": {"kind": "refused", "error": refused}})
         step.command(annotation("error", f"{name}: not started", refused))
@@ -354,15 +354,20 @@ def _end_one_off(spec, ctx, registry, rec, state):
         current = read_definition(registry, name)
         if current != spec.get("definition"):
             return ["This one-off was scheduled again or removed while it ran, so this run left the newer definition alone."], []
-        file = workflow_file(name)
+        # The file this job's step names: a step written before files took the name as given names claude-NAME.yml, and so is one that names none.
+        file = spec.get("workflow") or legacy_workflow_file(name)
         try:
             set_workflow_enabled(repo, file, False)
-            notes.append(f"This one-off is done: its workflow is disabled (`gh workflow enable {file} --repo {repo}` and a manual run would run it again; a disabled workflow cannot be re-run).")
+            notes.append(f"This one-off is done: its workflow is disabled ({code_span(f'gh workflow enable {shlex.quote(file)} --repo {repo}')} and a manual run would run it again; a disabled workflow cannot be re-run).")
         except GitHubError as e:
-            warnings.append(f"The one-off's workflow could not be disabled ({e.message}); `gh workflow disable {file} --repo {repo}` does it.")
-        gone = remove_agent(dispatcher_label(repo, name))
-        if gone["status"] == "failed":
-            warnings.append(f"The one-off's dispatcher could not be removed ({gone.get('error')}); `unschedule --name {name}` removes it.")
+            warnings.append(f"The one-off's workflow could not be disabled ({e.message}); {code_span(f'gh workflow disable {shlex.quote(file)} --repo {repo}')} does it.")
+        held = dispatcher_holder(repo, name)
+        if held:
+            warnings.append(f"The one-off's dispatcher was not removed: its plist path on this Mac holds {holder_words(held, code_span)}, which was left alone.")
+        else:
+            gone = remove_agent(dispatcher_label(repo, name))
+            if gone["status"] == "failed":
+                warnings.append(f"The one-off's dispatcher could not be removed ({gone.get('error')}); {code_span(f'unschedule --name {shlex.quote(name)}')} removes it.")
     return notes, warnings
 
 
@@ -401,7 +406,7 @@ def scheduled_finish(spec, env, write):
     base = {"name": name, "timezone": spec["timezone"], "prompt": env.get("CLAUDE_SCHEDULE_PROMPT")}
     if not Path(project).is_dir():
         # K23: no registry to keep anything in; GitHub gets the summary.
-        text = render_summary(None, {**base, "at": clock(), "outcome": {"kind": "missing", "title": "project missing", "error": f"{project} is not a directory on this runner.", "instead": f"If the project moved, run `schedule --name {name} --project <new path>` again."}})
+        text = render_summary(None, {**base, "at": clock(), "outcome": {"kind": "missing", "title": "project missing", "error": f"{project} is not a directory on this runner.", "instead": f"If the project moved, run {code_span(f'schedule --name {shlex.quote(name)} --project <new path>')} again."}})
         return _post(step, name, ctx, text)
     registry = resolve_runs_dir(project)
     rec = (read_job(registry, name, job) if job else None) or {}

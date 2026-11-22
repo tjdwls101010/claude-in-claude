@@ -31,8 +31,8 @@ class Job(Sandbox):
         env.update(extra or {})
         return env
 
-    def args(self, step, profile=None, cron="0 3 * * *", at=None, worktree=False, timeout=600, project=None):
-        a = ["__scheduled", step, "--name", "nightly", "--project", str(project or self.project), "--profile", profile or self.profile, "--model", "haiku", "--effort", "low", "--timeout", str(timeout), "--timezone", "Asia/Seoul"]
+    def args(self, step, profile=None, cron="0 3 * * *", at=None, worktree=False, timeout=600, project=None, name="nightly"):
+        a = ["__scheduled", step, "--name", name, "--project", str(project or self.project), "--profile", profile or self.profile, "--model", "haiku", "--effort", "low", "--timeout", str(timeout), "--timezone", "Asia/Seoul"]
         a += ["--at", at] if at else ["--cron", cron]
         return a + (["--worktree"] if worktree else [])
 
@@ -158,6 +158,13 @@ class Ends(Job):
         self.assertFalse(gone.exists(), "no registry is created where the project was")
         self.assertIn("project missing", summary.splitlines()[0])
         self.assertIn("--project <new path>", summary)
+
+    def test_the_project_gone_names_the_call_with_the_name_quoted(self):
+        run, finish, summary = self.job(self.job_env(), project=self.root / "moved-away", name="weekly report")
+        self.assertIn("::error title=weekly report%3A project missing::", run.stdout)
+        self.assertIn("run `schedule --name 'weekly report' --project <new path>` again", run.stdout)
+        self.assertEqual(summary.splitlines()[0], "# ❌ weekly report · project missing")
+        self.assertIn("run `schedule --name 'weekly report' --project <new path>` again.", summary)
 
     def test_an_unreadable_run_fails_the_finish_step_but_leaves_a_summary(self):
         env = self.job_env(prompt="x")
@@ -395,6 +402,53 @@ class Trees(Job):
         self.assertEqual(self.worker_calls(), [])
         self.assertIn("needs a commit", summary)
         self.assertNotIn("[!WARNING]", summary, "no group was ever made, so there is nothing to clean or warn about")
+
+
+class Names(Job):
+    """A schedule's name as given reaches the run; only the worktree group, which is also a git branch and a Claude Code worktree name, is an ASCII slug of it."""
+
+    profile = "write"
+
+    def groups(self):
+        return [g["group"] for g in self.cli_json("status")["groups"]]
+
+    def test_the_name_is_kept_whole_where_this_mac_keys_by_it(self):
+        name = "261128_SS_외국인순매수"
+        run, finish, summary = self.job(self.job_env(prompt="x"), name=name)
+        self.assertEqual((run.returncode, finish.returncode), (0, 0), run.stdout + finish.stdout)
+        (meta,) = self.scheduled_runs()
+        self.assertEqual(meta["origin"]["name"], name)
+        self.assertRegex(meta["run_id"], r"^\d{8}-\d{6}-261128-ss-[0-9a-f]{4}$")
+        self.assertIn(f"This is a scheduled run of {name} (manual,", self.worker_calls()[0]["messages"][0]["message"]["content"])
+        state = json.loads((self.runs_dir() / ".schedules" / name / "state.json").read_text())
+        self.assertEqual((state["name"], list(state["jobs"])), (name, ["44006368956-1"]))
+
+    def test_a_worktree_group_is_an_ascii_slug_of_the_name(self):
+        name = "261128_SS_외국인순매수"
+        run, finish, summary = self.job(self.job_env(prompt="x [[fake:write:notes.md]]"), worktree=True, name=name)
+        self.assertEqual((run.returncode, finish.returncode), (0, 0), run.stdout + finish.stdout)
+        self.assertTrue((self.project / ".claude" / "worktrees" / "261128-ss-44006368956-1-1" / "notes.md").exists())
+        self.assertIn("clean --group 261128-ss-44006368956-1", summary)
+        self.assertEqual(self.groups(), ["261128-ss-44006368956-1"])
+        (meta,) = self.scheduled_runs()
+        self.assertEqual(meta["origin"]["name"], name)
+
+    def test_a_name_with_no_ascii_letter_or_digit(self):
+        run, finish, summary = self.job(self.job_env(prompt="x [[fake:reply:read only]]"), worktree=True, name="외국인순매수")
+        self.assertEqual((run.returncode, finish.returncode), (0, 0), run.stdout + finish.stdout)
+        self.assertIn("/.claude/worktrees/schedule-44006368956-1-1`", summary)
+        self.assertIn("nothing to keep and was removed", summary)
+        self.assertEqual(self.groups(), [], "Finish cleaned the group its job recorded")
+
+    def test_a_long_name_and_a_long_run_id_fit_a_group_name(self):
+        # A group name holds 40 characters; "-<14-digit run id>-<attempt>" leaves 23 for the slug, and a cut that ends on a hyphen loses it.
+        for name, group in (("Quarterly_Earnings_Review_For_All_Tickers", "quarterly-earnings-revi-12345678901234-1"), ("abcdefghij abcdefghijk z", "abcdefghij-abcdefghijk-12345678901234-1")):
+            with self.subTest(name=name):
+                self.setUp()
+                run, finish, summary = self.job(self.job_env(run_id="12345678901234", prompt="x [[fake:write:notes.md]]"), worktree=True, name=name)
+                self.assertEqual((run.returncode, finish.returncode), (0, 0), run.stdout + finish.stdout)
+                self.assertEqual(self.groups(), [group])
+                self.assertLessEqual(len(group), 40)
 
 
 class HandOver(Job):

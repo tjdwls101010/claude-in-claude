@@ -1,0 +1,5 @@
+{
+ "exit": 1,
+ "stdout": "{\"message\":\"No commit found for the ref nope\",\"documentation_url\":\"https://docs.github.com/v3/repos/contents/\",\"status\":\"404\"}",
+ "stderr": "gh: No commit found for the ref nope (HTTP 404)\n"
+}

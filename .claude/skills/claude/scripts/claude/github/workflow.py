@@ -7,6 +7,8 @@ import math
 import re
 import shlex
 
+from .api import WORKFLOWS
+
 SPEC_PREFIX = "# spec: "
 HEADER = "# Written by the claude skill's `schedule` command. Run it again with the same --name to change it; `unschedule` removes it."
 # Characters a YAML block scalar cannot carry as they are.
@@ -14,8 +16,44 @@ UNSAFE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f  ﻿]")
 SPEC_KEYS = ("name", "cron", "at", "timezone", "profile", "model", "effort", "timeout", "worktree", "runs_on", "project", "cli", "definition", "prompt", "schema")
 
 
+# What a file name cannot hold on Windows, and the device names it reserves whatever follows the first dot.
+WINDOWS_FORBIDDEN = '\\:*?"<>|'
+WINDOWS_DEVICE = re.compile(r"(?:con|prn|aux|nul|(?:com|lpt)[0-9¹²³])", re.IGNORECASE)
+PATH_LIMIT = 255
+
+
 def workflow_file(name):
+    """The workflow file of schedule `name`: the name as given, which is also what the Actions list shows."""
+    return f"{name}.yml"
+
+
+def legacy_workflow_file(name):
+    """The file schedules had while files carried a prefix. Such a schedule keeps it: to GitHub a renamed file is another workflow, and the runs stay with the old one."""
     return f"claude-{name}.yml"
+
+
+def name_problem(name):
+    """Why `name` cannot name a schedule's workflow file, in words, or None when it can. Each reason is what GitHub, `gh` or a checkout of the repository does with it."""
+    if "/" in name:
+        return "`/` would make the workflow file a path"
+    if "${{" in name:
+        return "`${{` starts an expression GitHub evaluates inside a workflow file, and one in a workflow's name breaks the workflow"
+    if name.startswith("-"):
+        return "it starts with `-`, and `gh workflow run` would read the file name as a flag"
+    for ch in name:
+        if ch in WINDOWS_FORBIDDEN:
+            return f"`{ch}` cannot be in a file name on Windows, where a checkout of the repository would then fail"
+    if name.endswith((".", " ")):
+        return f"it ends in {'`.`' if name.endswith('.') else 'a space'}, and Windows cannot keep a file or folder name that ends in `.` or a space"
+    if len(f"{WORKFLOWS}/{workflow_file(name)}") > PATH_LIMIT:
+        return f"the workflow's path would pass the {PATH_LIMIT} characters GitHub takes; a longer one is committed as a broken workflow that fails a run on every push"
+    return None
+
+
+def reserved_name(name):
+    """The device name Windows reserves that a file called `name` would be (`CON`, `NUL`, `COM1`, …), or None. Windows looks only at what comes before the first dot."""
+    base = name.split(".", 1)[0].rstrip(" ")
+    return base.upper() if WINDOWS_DEVICE.fullmatch(base) else None
 
 
 def _escape(text):
@@ -62,8 +100,12 @@ def _step_args(step, spec):
     args += ["--timezone", spec["timezone"]]
     if spec.get("worktree"):
         args.append("--worktree")
-    args += ["--workflow", workflow_file(spec["name"]), "--definition", spec["definition"]]
+    args += ["--workflow", _file(spec), "--definition", spec["definition"]]
     return _string(f'uv run {_q(spec["cli"])} ' + " ".join(_q(a) for a in args))
+
+
+def _file(spec):
+    return spec.get("file") or workflow_file(spec["name"])
 
 
 def _env(spec, indent, token):
@@ -77,8 +119,9 @@ def _env(spec, indent, token):
 
 
 def render_workflow(spec):
-    """The workflow text for `spec` (see SPEC_KEYS): a cron or a one-off `at` in `timezone`, a manual `mode` (run or check) and the dispatcher's `source` input, `concurrency` that queues every trigger in order (K5), a job on the runners `runs_on` names, limited to the run's timeout plus 10 minutes, with a Run step and an always-run Finish step that take the same flags and environment (K19). Only a one-off asks for `actions: write`, which its Finish step needs to disable the workflow (K7, K8)."""
+    """The workflow text for `spec` (see SPEC_KEYS, plus `file`, the workflow file the text is for — default the name's own): the schedule's name as the title Actions shows (for a file with the old prefix, the title such files had, so whatever refers to it by title still does), a cron or a one-off `at` in `timezone`, a manual `mode` (run or check) and the dispatcher's `source` input, `concurrency` that queues every trigger in order (K5), a job on the runners `runs_on` names, limited to the run's timeout plus 10 minutes, with a Run step and an always-run Finish step that take the same flags and environment (K19). Only a one-off asks for `actions: write`, which its Finish step needs to disable the workflow (K7, K8)."""
     name = spec["name"]
+    title = f"claude · {name}" if _file(spec) == legacy_workflow_file(name) else name
     if spec.get("at"):
         when = spec["at"]
         minute, hour, day, month = when[14:16], when[11:13], when[8:10], when[5:7]
@@ -92,8 +135,9 @@ def render_workflow(spec):
     return "\n".join([
         HEADER,
         SPEC_PREFIX + json.dumps(record, ensure_ascii=False, sort_keys=True).replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"),
-        f"name: claude · {name}",
-        f"run-name: {name} · ${{{{ inputs.mode == 'check' && 'check' || inputs.source || github.event_name }}}}",
+        f"name: {_string(title)}",
+        # One quoted string: the name escaped, then the expression GitHub fills in, which must stay as it is.
+        f"run-name: \"{_string(name)[1:-1]} · ${{{{ inputs.mode == 'check' && 'check' || inputs.source || github.event_name }}}}\"",
         "on:",
         "  schedule:",
         f"    - cron: '{cron}'",
@@ -111,7 +155,7 @@ def render_workflow(spec):
         "        required: false",
         permissions,
         "concurrency:",
-        f"  group: claude-{name}",
+        f"  group: {_string('claude-' + name)}",
         "  cancel-in-progress: false",
         "  queue: max",
         "jobs:",
@@ -133,7 +177,7 @@ def render_workflow(spec):
 
 
 def parse_spec(text):
-    """The definition a workflow's `# spec:` line holds, or None when the workflow is not one this skill wrote: its first line is not the skill's header, or it has no spec line, or the spec names no schedule. ValueError when the line is there but is not a JSON object."""
+    """The definition a workflow's `# spec:` line holds, or None when the workflow is not one this skill wrote: its first line is not the skill's header, or it has no spec line, or the spec's `name` is not a non-empty string. ValueError when the line is there but is not a JSON object."""
     if not (text or "").startswith(HEADER + "\n"):
         return None
     for line in (text or "").splitlines():
@@ -141,5 +185,5 @@ def parse_spec(text):
             obj = json.loads(line[len(SPEC_PREFIX):])
             if not isinstance(obj, dict):
                 raise ValueError("the spec line does not hold a JSON object")
-            return obj if obj.get("name") else None
+            return obj if isinstance(obj.get("name"), str) and obj["name"] else None
     return None

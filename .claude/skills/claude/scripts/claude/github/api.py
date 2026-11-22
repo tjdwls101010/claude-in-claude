@@ -1,4 +1,4 @@
-"""GitHub through the `gh` CLI: its login and token scopes, which repository a git remote names, a repository's facts, workflow files read, committed and deleted on the default branch through the Contents API (probe 11, 15), a workflow's state, enabling and disabling it, and the repository's runners. Every path, field and error text of GitHub's lives here; callers get the skill's own terms and GitHubError."""
+"""GitHub through the `gh` CLI: its login and token scopes, which repository a git remote names, a repository's facts, workflow files read, committed and deleted on the default branch through the Contents API (probe 11, 15), the whole workflow directory in one GraphQL call, a workflow's state, enabling and disabling it, and the repository's runners. Every path, field and error text of GitHub's lives here; callers get the skill's own terms and GitHubError."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import subprocess
+from urllib.parse import quote
 
 WORKFLOWS = ".github/workflows"
 REMOTE = re.compile(r"^(?:https://(?:[^@/]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+)/([^/]+?)(?:\.git)?/?$")
@@ -24,6 +25,15 @@ class GitHubError(Exception):
 
 def gh_path():
     return shutil.which("gh")
+
+
+def _contents(repo, file):
+    """The Contents API path of a workflow file. gh reads the argument as a URL — `#` starts a fragment, `?` a query, `%` an escape (a raw `a#b.yml` wrote the file `a`) — so a name goes in percent-encoded, as does a branch in `?ref=`."""
+    return f"repos/{repo}/contents/{WORKFLOWS}/{quote(file, safe='')}"
+
+
+def _workflow(repo, file):
+    return f"repos/{repo}/actions/workflows/{quote(file, safe='')}"
 
 
 def _gh(*args, stdin=None, env=None):
@@ -91,15 +101,32 @@ def repo_facts(repo):
     return {"full_name": data.get("full_name"), "private": bool(data.get("private")), "default_branch": data.get("default_branch"), "can_push": bool((data.get("permissions") or {}).get("push"))}
 
 
-def read_workflow(repo, file, branch):
-    """The workflow file on `branch` as `{text, sha, url}`, or None when there is none."""
+def _graphql(query, variables):
+    """The `data` of a GraphQL answer; GitHubError for one that carries `errors` (status 404 when GitHub cannot resolve what was named) or is no answer."""
+    proc = _gh("api", "graphql", "--input", "-", stdin=json.dumps({"query": query, "variables": variables}))
     try:
-        data = _api(f"repos/{repo}/contents/{WORKFLOWS}/{file}?ref={branch}")
+        reply = json.loads(proc.stdout)
+    except ValueError:
+        reply = None
+    errors = reply.get("errors") if isinstance(reply, dict) else None
+    if proc.returncode != 0 or errors or not isinstance(reply, dict) or not isinstance(reply.get("data"), dict):
+        first = errors[0] if isinstance(errors, list) and errors and isinstance(errors[0], dict) else {}
+        raise GitHubError(first.get("message") or (proc.stderr or proc.stdout).strip() or "gh api graphql answered nothing", 404 if first.get("type") == "NOT_FOUND" else None)
+    return reply["data"]
+
+
+def read_workflow(repo, file, branch):
+    """What sits at the workflow file's path on `branch`, as `{text, sha, url}`, or None when nothing does. `text` is None when it is not a file: the Contents API answers a directory with a list."""
+    try:
+        data = _api(f"{_contents(repo, file)}?ref={quote(branch, safe='')}")
     except GitHubError as e:
         if e.status == 404:
             return None
         raise
-    text = base64.b64decode(data.get("content") or "").decode("utf-8")
+    if not isinstance(data, dict):
+        return {"text": None, "sha": None, "url": None}
+    # A file that is not UTF-8 is nobody's schedule; it is read without failing.
+    text = base64.b64decode(data.get("content") or "").decode("utf-8", "replace")
     return {"text": text, "sha": data.get("sha"), "url": data.get("html_url")}
 
 
@@ -108,20 +135,20 @@ def write_workflow(repo, file, text, message, branch, sha=None):
     body = {"message": message, "content": base64.b64encode(text.encode("utf-8")).decode("ascii"), "branch": branch}
     if sha:
         body["sha"] = sha
-    data = _api(f"repos/{repo}/contents/{WORKFLOWS}/{file}", "PUT", body)
+    data = _api(_contents(repo, file), "PUT", body)
     return {"commit": (data.get("commit") or {}).get("sha"), "url": (data.get("content") or {}).get("html_url")}
 
 
 def delete_workflow(repo, file, message, branch, sha):
     """Delete the workflow file from `branch`; `{commit}`."""
-    data = _api(f"repos/{repo}/contents/{WORKFLOWS}/{file}", "DELETE", {"message": message, "branch": branch, "sha": sha})
+    data = _api(_contents(repo, file), "DELETE", {"message": message, "branch": branch, "sha": sha})
     return {"commit": (data.get("commit") or {}).get("sha")}
 
 
 def workflow_state(repo, file):
     """`active`, `disabled_manually`, … as GitHub reports it, or None when GitHub knows no such workflow."""
     try:
-        return _api(f"repos/{repo}/actions/workflows/{file}").get("state")
+        return _api(_workflow(repo, file)).get("state")
     except GitHubError as e:
         if e.status == 404:
             return None
@@ -129,18 +156,39 @@ def workflow_state(repo, file):
 
 
 def set_workflow_enabled(repo, file, enabled):
-    _api(f"repos/{repo}/actions/workflows/{file}/{'enable' if enabled else 'disable'}", "PUT", empty_ok=True)
+    _api(f"{_workflow(repo, file)}/{'enable' if enabled else 'disable'}", "PUT", empty_ok=True)
 
 
-def list_workflows(repo, prefix):
-    """The repository's workflows whose file name starts with `prefix`: `[{file, state}]`."""
-    out, page = [], 1
+WORKFLOW_FILES = "query($owner: String!, $name: String!, $e: String!) { repository(owner: $owner, name: $name) { object(expression: $e) { ... on Tree { entries { name type object { ... on Blob { byteSize isTruncated text } } } } } } }"
+
+
+def list_workflow_files(repo, branch):
+    """Everything in the workflow directory on `branch`, in one GraphQL call: `[{file, kind, text}]`, `kind` as git names it (`blob`, `tree`, …) and `text` the body of a `.yml` or `.yaml` blob, None for anything else. A body the call did not bring whole (GraphQL gives none for a binary blob and marks a cut one) is read on its own. An empty list when the directory is not there."""
+    owner, name = repo.split("/", 1)
+    repository = _graphql(WORKFLOW_FILES, {"owner": owner, "name": name, "e": f"{branch}:{WORKFLOWS}"}).get("repository")
+    if repository is None:
+        raise GitHubError(f"GitHub does not show {repo}", 404)
+    out = []
+    for entry in (repository.get("object") or {}).get("entries") or []:
+        file, kind, blob = entry.get("name"), entry.get("type"), entry.get("object") or {}
+        text = None
+        if kind == "blob" and file.lower().endswith((".yml", ".yaml")):
+            text = None if blob.get("isTruncated") else blob.get("text")
+            if text is None:
+                text = (read_workflow(repo, file, branch) or {}).get("text")
+        out.append({"file": file, "kind": kind, "text": text})
+    return out
+
+
+def workflow_states(repo):
+    """The state of every workflow GitHub has registered from the workflow directory: `{file: state}`. A file committed a moment ago can be missing."""
+    out, page = {}, 1
     while True:
         batch = _api(f"repos/{repo}/actions/workflows?per_page=100&page={page}").get("workflows") or []
         for w in batch:
-            file = (w.get("path") or "").rsplit("/", 1)[-1]
-            if (w.get("path") or "").startswith(WORKFLOWS + "/") and file.startswith(prefix):
-                out.append({"file": file, "state": w.get("state")})
+            path = w.get("path") or ""
+            if path.startswith(WORKFLOWS + "/"):
+                out[path[len(WORKFLOWS) + 1 :]] = w.get("state")
         if len(batch) < 100:
             return out
         page += 1

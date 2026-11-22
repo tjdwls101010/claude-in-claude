@@ -178,11 +178,24 @@ def write_definition(registry, name, definition):
     _save(registry, name, state)
 
 
+def schedule_state_holder(registry, name):
+    """The other schedule whose state sits where `name`'s would — the name its state.json records, when that is not `name` to the letter — or None. A file system that ignores letter case and Unicode form gives two names one directory."""
+    try:
+        held = (schedule_state(registry, name) or {}).get("name")
+    except ValueError:
+        return None
+    return held if isinstance(held, str) and held != name else None
+
+
 def remove_schedule_state(registry, name):
-    """Delete the schedule's state and files. Call under schedule_lock."""
+    """Delete the schedule's state and files — unless the directory is another schedule's (see `schedule_state_holder`): then nothing is deleted and that schedule's name is returned. A directory whose state.json is missing or unreadable names nobody and goes; it holds only copies of summaries and schemas. Call under schedule_lock."""
     import shutil
 
+    held = schedule_state_holder(registry, name)
+    if held:
+        return held
     shutil.rmtree(schedule_dir(registry, name), ignore_errors=True)
+    return None
 
 
 def latest_job(registry, name):
