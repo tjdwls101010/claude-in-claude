@@ -55,6 +55,11 @@ def nfc(text):
     return unicodedata.normalize("NFC", text)
 
 
+def path_key(text):
+    """What a file system that ignores letter case and Unicode form compares a file name by — as this Mac's does: a directory made as `Case_Test` exists as `case_test`, and one made in NFC exists under its NFD path. Case folding can merge more than such a file system would (ß and ss); callers use the key to refuse, where merging more only refuses more."""
+    return nfc(nfc(text).casefold())
+
+
 def trim_bytes(text, limit):
     """`text` cut to at most `limit` UTF-8 bytes at a character boundary."""
     data = text.encode("utf-8", "replace")

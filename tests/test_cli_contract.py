@@ -8,6 +8,7 @@ import sys
 import unittest
 
 from support.harness import ENTRY, Sandbox, build_parser
+from support.names import REFUSED
 
 COMMANDS = ("start", "resume", "send", "batch", "status", "log", "result", "stop", "clean", "schedule", "unschedule", "doctor")
 
@@ -88,6 +89,22 @@ class ArgumentErrors(unittest.TestCase):
 
     def test_no_command(self):
         self.check([], "--help")
+
+
+class ScheduleNames(unittest.TestCase):
+    def test_a_refused_name_is_a_command_line_to_change(self):
+        for name, word in REFUSED:
+            with self.subTest(name=name):
+                proc = run("schedule", f"--name={name}", "x", "--cron", "0 3 * * *", "--profile", "read-only", "--dry-run")
+                self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+                reply = json.loads(proc.stdout)
+                self.assertIn(word, reply["error"])
+                self.assertEqual(reply["help"], "schedule --help")
+
+    def test_the_help_says_what_a_name_is_and_cannot_hold(self):
+        line = next(l for l in subcommand_help("schedule").splitlines() if l.lstrip().startswith("--name NAME"))
+        for word in (".github/workflows/NAME.yml", "a different name is a different workflow", "80", "`/`", "`${{`", "`-`"):
+            self.assertIn(word, line)
 
 
 class Entry(Sandbox):

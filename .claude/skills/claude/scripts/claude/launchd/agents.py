@@ -13,6 +13,8 @@ from xml.parsers.expat import ExpatError
 
 # A dispatcher with more calendar entries than this is refused; ask for a coarser time (K6).
 CALENDAR_LIMIT = 500
+# What a file name holds on this Mac, in UTF-16 units (measured on APFS: 255 Korean or ASCII characters fit, 256 do not; emoji, two units each, stop at 127).
+FILE_NAME_UNITS = 255
 KEYS = (("minute", "Minute"), ("hour", "Hour"), ("month", "Month"))
 
 
@@ -63,6 +65,14 @@ def calendar_entries(fields):
 def render_agent(label, argv, calendar, log):
     """The plist of an agent that runs `argv` at the `calendar` times, its output appended to `log`."""
     return plistlib.dumps({"Label": label, "ProgramArguments": list(argv), "StartCalendarInterval": calendar, "StandardOutPath": str(log), "StandardErrorPath": str(log), "RunAtLoad": False, "ProcessType": "Background"}).decode("utf-8")
+
+
+def label_problem(label):
+    """Why an agent of this label cannot be installed, in words, or None: its plist is the file `<label>.plist`."""
+    units = len(f"{label}.plist".encode("utf-16-le", "surrogatepass")) // 2
+    if units > FILE_NAME_UNITS:
+        return f"its plist's file name would be {units} UTF-16 units, and a file name on this Mac holds {FILE_NAME_UNITS}"
+    return None
 
 
 def agent_identity(label):

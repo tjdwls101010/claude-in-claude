@@ -20,14 +20,14 @@ from claude.batch import batch, clean
 from claude.claude_cli import auth_status, claude_version, render_rows, sandbox_prereqs, version_floor_check
 from claude.errors import Refusal
 from claude.git import commits_beyond, committed_files, head_commit, numstat, status_snapshot, toplevel
-from claude.github import JOB_HANDLES, GitHubError, annotation, job_context, resume_commands, set_workflow_enabled, stop_commands, workflow_file, write_output, write_summary
+from claude.github import JOB_HANDLES, GitHubError, annotation, job_context, legacy_workflow_file, resume_commands, set_workflow_enabled, stop_commands, write_output, write_summary
 from claude.launchd import remove_agent
 from claude.observe import snapshot, wait_ended
 from claude.registry import claim_slot, claude_alive, find_by_origin_job, group_view, is_live, list_groups, read_definition, read_job, reap, record_job, resolve_runs_dir, schedule_dir, schedule_lock, update_job
 from claude.runs import start, stop
 from claude.util import entry_path, invocation
 
-from .spec import dispatcher_holder, dispatcher_label
+from .spec import dispatcher_holder, dispatcher_label, worktree_group
 from .summary import render_summary
 from .times import current_slot
 
@@ -113,18 +113,17 @@ def _scrub_worker_env():
             del os.environ[key]
 
 
-def _start_worker(spec, prompt, schema_path, registry, ctx, origin):
-    """Start the worker as `start` would, or as a one-member `batch --worktree` group (K10). Returns (run_id, group, refusal)."""
+def _start_worker(spec, prompt, schema_path, registry, group, origin):
+    """Start the worker as `start` would, or — given a `group` — as that one-member `batch --worktree` group (K10). Returns (run_id, refusal)."""
     s = spec["settings"]
-    if spec.get("worktree"):
-        group = f"{spec['name']}-{ctx['run_id']}-{ctx['attempt']}"
+    if group:
         reply = batch(name=group, task_args=[prompt], tasks_file=None, defaults={"profile": s["profile"], "model": s["model"], "effort": s["effort"], "schema": schema_path, "timeout": s["timeout"], "cwd": None}, cwd=spec["project"], use_worktrees=True, runs_dir=registry, origin=origin)
         member = (reply.get("runs") or [{}])[0]
         if not member.get("run_id"):
-            return None, group, member.get("error") or "the worktree member did not start"
-        return member["run_id"], group, None
+            return None, member.get("error") or "the worktree member did not start"
+        return member["run_id"], None
     reply = start(prompt=prompt, cwd=spec["project"], flags={"profile": s["profile"], "model": s["model"], "effort": s["effort"], "schema": schema_path, "cwd": spec["project"]}, label=spec["name"], timeout=s["timeout"], runs_dir=registry, origin=origin)
-    return reply["run_id"], None, None
+    return reply["run_id"], None
 
 
 def _follow(run_id, registry, step, stop_event):
@@ -171,8 +170,8 @@ def scheduled_run(spec, env, write):
 
     trigger = trigger_of(ctx, env.get("CLAUDE_SCHEDULE_SOURCE") or "")
     s = spec["settings"]
-    worktree_group = f"{name}-{ctx['run_id']}-{ctx['attempt']}" if spec.get("worktree") else None
-    entry = {"trigger": trigger, "mode": "run", "profile": s["profile"], "url": ctx["url"], "attempt": ctx["attempt"], "group": worktree_group, "tree_before": None if spec.get("worktree") else status_snapshot(project), "outcome": None}
+    group = worktree_group(name, ctx["run_id"], ctx["attempt"]) if spec.get("worktree") else None
+    entry = {"trigger": trigger, "mode": "run", "profile": s["profile"], "url": ctx["url"], "attempt": ctx["attempt"], "group": group, "tree_before": None if spec.get("worktree") else status_snapshot(project), "outcome": None}
     slot = retry_of = None
     if trigger in AUTOMATIC:
         now = clock()
@@ -213,9 +212,9 @@ def scheduled_run(spec, env, write):
         origin["retry_of"] = retry_of["job"]
     _scrub_worker_env()
     try:
-        run_id, group, refused = _start_worker(spec, prompt, schema_path, registry, ctx, origin)
+        run_id, refused = _start_worker(spec, prompt, schema_path, registry, group, origin)
     except Refusal as e:
-        run_id, group, refused = None, worktree_group, e.message
+        run_id, refused = None, e.message
     if refused:
         update_job(registry, name, job, {"outcome": {"kind": "refused", "error": refused}})
         step.command(annotation("error", f"{name}: not started", refused))
@@ -355,7 +354,7 @@ def _end_one_off(spec, ctx, registry, rec, state):
         if current != spec.get("definition"):
             return ["This one-off was scheduled again or removed while it ran, so this run left the newer definition alone."], []
         # The file this job's step names: a step written before files took the name as given names claude-NAME.yml, and so is one that names none.
-        file = spec.get("workflow") or workflow_file(name)
+        file = spec.get("workflow") or legacy_workflow_file(name)
         try:
             set_workflow_enabled(repo, file, False)
             notes.append(f"This one-off is done: its workflow is disabled (`gh workflow enable {file} --repo {repo}` and a manual run would run it again; a disabled workflow cannot be re-run).")

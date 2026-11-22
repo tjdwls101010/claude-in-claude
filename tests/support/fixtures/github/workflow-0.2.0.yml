@@ -1,0 +1,45 @@
+# Written by the claude skill's `schedule` command. Run it again with the same --name to change it; `unschedule` removes it.
+# spec: {"at": null, "cli": "{CLI}", "cron": "0 3 * * *", "definition": "715ffbd0", "effort": "high", "model": "sonnet", "name": "nightly", "profile": "read-only", "project": "{PROJECT}", "prompt": "Review yesterday's commits and report what looks risky.", "runs_on": ["self-hosted"], "schema": null, "timeout": 3600, "timezone": "{TZ}", "worktree": false}
+name: claude · nightly
+run-name: nightly · ${{ inputs.mode == 'check' && 'check' || inputs.source || github.event_name }}
+on:
+  schedule:
+    - cron: '0 3 * * *'
+      timezone: {TZ}
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: run starts the worker; check only verifies that this runner can log in and start one
+        type: choice
+        options: [run, check]
+        default: run
+      source:
+        description: Leave empty for a manual run. The local dispatcher sets it so that a late duplicate is skipped.
+        type: string
+        required: false
+permissions: {}
+concurrency:
+  group: claude-nightly
+  cancel-in-progress: false
+  queue: max
+jobs:
+  run:
+    runs-on: ["self-hosted"]
+    timeout-minutes: 70
+    steps:
+      - name: Run
+        env:
+          CLAUDE_SCHEDULE_MODE: ${{ inputs.mode }}
+          CLAUDE_SCHEDULE_SOURCE: ${{ inputs.source }}
+          CLAUDE_SCHEDULE_PROMPT: |2-
+            Review yesterday's commits and report what looks risky.
+        run: "uv run {CLI_SH} __scheduled run --name nightly --project {PROJECT_SH} --profile read-only --model sonnet --effort high --timeout 3600 --cron '0 3 * * *' --timezone {TZ} --workflow claude-nightly.yml --definition 715ffbd0"
+      - name: Finish
+        if: always()
+        env:
+          CLAUDE_SCHEDULE_MODE: ${{ inputs.mode }}
+          CLAUDE_SCHEDULE_SOURCE: ${{ inputs.source }}
+          CLAUDE_SCHEDULE_PROMPT: |2-
+            Review yesterday's commits and report what looks risky.
+          GH_TOKEN: ${{ github.token }}
+        run: "uv run {CLI_SH} __scheduled finish --name nightly --project {PROJECT_SH} --profile read-only --model sonnet --effort high --timeout 3600 --cron '0 3 * * *' --timezone {TZ} --workflow claude-nightly.yml --definition 715ffbd0"

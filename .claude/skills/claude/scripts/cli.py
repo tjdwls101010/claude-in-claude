@@ -25,7 +25,7 @@ from claude.doctor import doctor
 from claude.errors import Refusal
 from claude.observe import GROUP_MESSAGE_CAP, LISTING_ROWS, STALL_SECONDS, log, result, status
 from claude.runs import DEFAULTS, EFFORTS, SEND_LIMIT, resume, send, start, stop, supervise
-from claude.schedule import NAME_RULE, SCHEDULE_DEFAULTS, schedule, scheduled_finish, scheduled_run, schedules, unschedule
+from claude.schedule import SCHEDULE_DEFAULTS, schedule, scheduled_finish, scheduled_run, schedules, unschedule
 
 EXIT_REFUSED, EXIT_ARGUMENTS, EXIT_BLOCKED = 1, 2, 3
 
@@ -271,7 +271,7 @@ def build_parser():
     p = sub.add_parser("schedule", usage="cli.py schedule --name NAME [PROMPT | --prompt-file FILE] (--cron EXPR | --at YYYY-MM-DDTHH:MM) --profile P [options]\n       cli.py schedule --list", help="run a worker later or on a schedule, through this repository's runner", description=SCHEDULE_DESC, epilog=SCHEDULE_EPILOG, formatter_class=OneLinePerParagraph)
     p.add_argument("prompt", nargs="?", metavar="PROMPT", help="what the worker should do, standing on its own: nobody can answer it and nobody saw this conversation; or give --prompt-file. Required for a new schedule; given again, it replaces the recorded one")
     p.add_argument("--prompt-file", metavar="FILE", help="read the prompt from FILE; `-` reads stdin (stdin is read only then)")
-    p.add_argument("--name", metavar="NAME", help="the schedule's name: lowercase letters, digits and hyphens, at most 24; the workflow is claude-NAME.yml")
+    p.add_argument("--name", metavar="NAME", help="the schedule's name, used as given for the workflow file (.github/workflows/NAME.yml) and its title in Actions; a different name is a different workflow, and past runs stay with the old one. Up to 80 characters (an emoji counts as two); no `/` `\\` `:` `*` `?` `\"` `<` `>` `|`, no `${{`, no control or invisible character; not starting with `-` or a space, not ending with `.` or a space")
     when = p.add_mutually_exclusive_group()
     when.add_argument("--cron", metavar="EXPR", help="five numeric cron fields in this Mac's time zone, e.g. '0 3 * * *' (see below)")
     when.add_argument("--at", metavar="YYYY-MM-DDTHH:MM", help="run once at this local time (this Mac's time zone)")
@@ -440,14 +440,10 @@ def dispatch(args):
             return 0
         if not args.name:
             raise Refusal("--name is required", arguments=True, help="schedule --help")
-        if not NAME_RULE.match(args.name):
-            raise Refusal(f"--name {args.name!r}: lowercase letters, digits and hyphens, starting with a letter or digit, at most 24", arguments=True, help="schedule --help")
         flags = {"prompt": schedule_prompt(args), "schema": schedule_schema(args.schema), "cron": args.cron, "at": args.at, "profile": args.profile, "model": args.model, "effort": args.effort, "timeout": args.timeout, "worktree": args.worktree, "runs_on": args.runs_on}
         emit(schedule(name=args.name, flags=flags, cwd=base_dir(args), dry_run=args.dry_run, public_ok=args.public_ok, message=args.message))
         return 0
     if c == "unschedule":
-        if not NAME_RULE.match(args.name):
-            raise Refusal(f"--name {args.name!r}: lowercase letters, digits and hyphens, starting with a letter or digit, at most 24", arguments=True, help="unschedule --help")
         emit(unschedule(name=args.name, cwd=base_dir(args), message=args.message))
         return 0
     if c == "doctor":

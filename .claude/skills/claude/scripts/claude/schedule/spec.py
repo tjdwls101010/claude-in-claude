@@ -4,18 +4,25 @@ from __future__ import annotations
 
 import re
 import secrets
+import unicodedata
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from claude.errors import Refusal
-from claude.github import unsafe_text
+from claude.github import name_problem, unsafe_text
 from claude.launchd import agent_identity, calendar_entries
 from claude.runs import DEFAULTS
+from claude.util import nfc
 
 from .times import CronError, fire_times, parse_cron
 
-# The worktree group <name>-<run id>-<attempt> must fit a group name's 40 characters with an 11-digit run id and a spare digit (K10).
-NAME_RULE = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
+# A name's length in UTF-16 units, the unit this Mac's file names are counted in. The dispatcher's plist is claude-schedule.<owner>-<repository>.<name>.plist; with GitHub's longest owner (39) and repository (100) that is 163 units around the name, so 80 fits a file name (255) for any repository, with room to spare.
+NAME_UNITS = 80
+# What a name was before files took it as given. A schedule of such a name may live in the file names had then (claude-<name>.yml).
+OLD_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,23}")
+# A group name's length, which a worktree group must fit together with the run id and attempt (K10).
+GROUP_CHARS = 40
+UNSEEN = {"Cc": "a control character", "Zl": "a line separator", "Zp": "a paragraph separator", "Zs": "a space other than the ordinary one", "Cf": "a formatting character that does not show", "Cn": "not a character this Python's Unicode tables know", "Cs": "half of a surrogate pair", "Co": "a private-use character"}
 LABEL_RULE = re.compile(r"^[A-Za-z0-9._-]+$")
 SCHEDULE_DEFAULTS = {"model": DEFAULTS["model"], "effort": DEFAULTS["effort"], "timeout": 3600, "worktree": False, "runs_on": ["self-hosted"]}
 AT_FORMAT = "%Y-%m-%dT%H:%M"
@@ -47,9 +54,41 @@ def dispatcher_holder(repo, name):
     return f"the dispatcher {found['label']}" + (f" of {target}" if target else ", which names no repository") + f" ({found['plist']})"
 
 
+def _unseen(name):
+    """Why `name` would not show everything it holds, or None. The zero-width joiner and non-joiner stay: emoji sequences and several scripts are written with them."""
+    for ch in name:
+        kind = unicodedata.category(ch)
+        if kind in ("Cc", "Zl", "Zp", "Cn", "Cs", "Co") or (kind == "Zs" and ch != " ") or (kind == "Cf" and ch not in "\u200c\u200d"):
+            return f"U+{ord(ch):04X} is {UNSEEN[kind]}, and a name must show everything it holds or two names could look the same"
+    if name.startswith(" "):
+        return "it starts with a space, which does not show"
+    return None
+
+
 def check_name(name):
-    if not NAME_RULE.match(name or ""):
-        raise bad(f"--name {name!r}: lowercase letters, digits and hyphens, starting with a letter or digit, at most 24")
+    """`name` in NFC, the one form every use of it takes from here on (GitHub keeps the NFC and NFD spellings of a file as two paths) — or the Refusal that says why it cannot be a schedule's name. A name is used as given for the workflow file, the title in Actions, this Mac's dispatcher label and state directory, so each reason is what one of them cannot take; anything else is the person's to choose."""
+    name = nfc(name or "")
+    if not name:
+        raise bad("--name is empty")
+    problem = _unseen(name) or name_problem(name)
+    units = len(name.encode("utf-16-le", "surrogatepass")) // 2
+    if not problem and units > NAME_UNITS:
+        problem = f"it is {units} UTF-16 units long (an emoji counts as two) and a name holds {NAME_UNITS}: this Mac's dispatcher file is named after the repository and the schedule together, and must stay a file name"
+    if problem:
+        raise bad(f"--name {name!r}: {problem}")
+    return name
+
+
+def was_old_name(name):
+    """Whether `name` could have been a schedule's while files were claude-<name>.yml."""
+    return bool(OLD_NAME.fullmatch(name))
+
+
+def worktree_group(name, run_id, attempt):
+    """The group one job's `--worktree` run takes: an ASCII slug of the schedule's name, then the job's run id and attempt, within a group name's length — a group name is also a git branch and a Claude Code worktree name, which do not take what a schedule's name may hold. The run id makes it unique, so names with one slug do not collide; a name with no ASCII letter or digit is `schedule`."""
+    tail = f"-{run_id}-{attempt}"
+    slug = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")[: max(0, GROUP_CHARS - len(tail))].rstrip("-")
+    return (slug or "schedule") + tail
 
 
 def fields_of(spec):

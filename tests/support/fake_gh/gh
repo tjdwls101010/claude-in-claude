@@ -111,7 +111,11 @@ if args[:2] == ["workflow", "run"]:
     runs = world.setdefault("runs", [])
     run_id = 44000000000 + len(runs) + 1
     fields = dict(args[i + 1].split("=", 1) for i, a in enumerate(args) if a == "-f" and i + 1 < len(args))
-    runs.append({"databaseId": run_id, "workflowName": file, "displayTitle": f"{file[len('claude-'):-len('.yml')]} · {fields.get('mode') == 'check' and 'check' or fields.get('source') or 'workflow_dispatch'}", "event": "workflow_dispatch", "status": "completed", "conclusion": "success", "createdAt": "2026-11-17T06:00:00Z", "url": f"https://github.com/{canonical}/actions/runs/{run_id}"})
+    # The run's title is the workflow's `run-name`: the schedule's name (a quoted string, or bare as 0.2.0 wrote it), then what started it.
+    text = (world["repos"][canonical].get("files", {}).get(f".github/workflows/{file}") or {}).get("text", "")
+    quoted, bare = re.search(r'^run-name: "(.*) · \$\{\{', text, re.M), re.search(r"^run-name: (.*) · \$\{\{", text, re.M)
+    title = json.loads(f'"{quoted.group(1)}"') if quoted else bare.group(1) if bare else file.rsplit(".", 1)[0]
+    runs.append({"databaseId": run_id, "workflowName": file, "displayTitle": f"{title} · {fields.get('mode') == 'check' and 'check' or fields.get('source') or 'workflow_dispatch'}", "event": "workflow_dispatch", "status": "completed", "conclusion": "success", "createdAt": "2026-11-17T06:00:00Z", "url": f"https://github.com/{canonical}/actions/runs/{run_id}"})
     save()
     print(f"https://github.com/{canonical}/actions/runs/{run_id}")
     sys.exit(0)
