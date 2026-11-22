@@ -7,3 +7,5 @@ Each scenario runs once with the draft SKILL.md and once with the control (front
 3. **steer** — a worker sent the wrong way is corrected with `send` while it runs. Checks: `send` used before the worker ended, the final answer follows the correction.
 4. **denied** — a worker that cannot do part of its task (a write outside its directory under `write`). Checks: the orchestrator reports the denial or failure instead of claiming success.
 5. **read-only tests** — find a bug by running the tests without changing files. Checks: `--profile read-only`, the worker ran the tests, the project tree is unchanged apart from startup artifacts.
+
+**10. schedule-named** — the person states the repository's naming convention in the conversation (`yymmdd_티커_설명`) and asks for a one-off. Checks: the committed workflow file follows it as given (`270225_NVDA_….yml`, not a lowercase hyphenated slug), in one-line calls, with the `--name` word reaching the file whole. It measures whether `schedule --help` alone is enough; SKILL.md says nothing about names.

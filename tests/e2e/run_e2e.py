@@ -4,7 +4,7 @@ Run from the repository root (real claude, real subscription):
     python3 tests/e2e/run_e2e.py --out .tmp/e2e            # every scenario, both variants
     python3 tests/e2e/run_e2e.py --scenario 3 --variant draft --out .tmp/e2e
 
-Scheduling scenarios (6-9) put the fake `gh` and `launchctl` from tests/support first on PATH, so nothing reaches GitHub or launchd; their project's remote is the fake's `someone/project`. The orchestrator must run with the real HOME (its login), so `schedule` writes its dispatcher plist to the real ~/Library/LaunchAgents — never loaded, since launchctl is the fake — and a scenario with a ready runner puts an inert runner-service plist there; both are removed by their exact `someone-project` names after each session, also when it fails.
+Scheduling scenarios (6-10) put the fake `gh` and `launchctl` from tests/support first on PATH, so nothing reaches GitHub or launchd; their project's remote is the fake's `someone/project`. The orchestrator must run with the real HOME (its login), so `schedule` writes its dispatcher plist to the real ~/Library/LaunchAgents — never loaded, since launchctl is the fake — and a scenario with a ready runner puts an inert runner-service plist there; both are removed by their exact `someone-project` names after each session, also when it fails.
 
 Each session gets a fresh project under --out, an orchestrator `claude -p --model sonnet --setting-sources project,local` (so neither the user's live copy of this skill nor their global CLAUDE.md is in it), and a temporary plugin holding only this skill in the variant under test. Workers are started by the skill's CLI and so run with the user's whole environment. Prints one JSON summary line per session and writes the orchestrator's events next to it.
 """
@@ -16,6 +16,7 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -102,6 +103,14 @@ SCHEDULING = {
         "prompt": "매일 새벽 3시에 이 저장소의 어제 커밋을 리뷰해서 알려 주도록 클로드 작업자를 예약해 줘.",
         "runner": "none",
         "expect_profile": "read-only",
+    },
+    10: {
+        "name": "schedule-named",
+        "files": {"README.md": "# project\n", "notes/NVDA.md": "# NVDA\n\nQ3 notes.\n"},
+        "prompt": "이 저장소의 예약 이름은 `yymmdd_티커_설명`이야. NVDA 실적 다음 날 2027-02-25 09:00에 notes/NVDA.md 재분석을 예약해 줘.",
+        "runner": "ready",
+        "expect_profile": None,
+        "expect_file": r"^270225_NVDA_[^/]+\.yml$",
     },
 }
 SCENARIOS.update({n: {**sc, "schedule": True} for n, sc in SCHEDULING.items()})
@@ -281,7 +290,7 @@ def run_session(out, number, variant, timeout):
             "dry_run_first": bool(scheds) and "--dry-run" in scheds[0],
             "committed": bool(committed),
             "committed_profile": (spec or {}).get("profile"),
-            "profile_ok": (spec or {}).get("profile") == sc["expect_profile"] if spec else None,
+            "profile_ok": (spec or {}).get("profile") == sc["expect_profile"] if spec and sc["expect_profile"] else None,
             "committed_prompt": (spec or {}).get("prompt"),
             "committed_time": (spec or {}).get("cron") or (spec or {}).get("at"),
             "ran_check": any("gh workflow run" in c and "mode=check" in c for c in bash),
@@ -290,6 +299,19 @@ def run_session(out, number, variant, timeout):
             "named_runner_problem": bool(re.search(r"(?i)(runner|러너)", answer)),
             "other_bash": [c[:200] for c in bash if "cli.py" not in c],
         })
+        if sc.get("expect_file"):
+            # The name the person's convention gives, as given: the committed file, and the --name word of the call that committed it.
+            files = sorted(path.rsplit("/", 1)[-1] for path in committed)
+
+            def name_word(command):
+                try:
+                    words = shlex.split(command)
+                except ValueError:
+                    return None
+                given = [w.split("=", 1)[1] if w.startswith("--name=") else words[i + 1] for i, w in enumerate(words[:-1]) if w == "--name" or w.startswith("--name=")]
+                return given[0] if given else None
+
+            summary.update({"committed_files": files, "name_ok": len(files) == 1 and bool(re.match(sc["expect_file"], files[0])), "name_as_called": [name_word(c) for c in scheds], "name_reaches_file": bool(spec) and any(name_word(c) == spec.get("name") for c in scheds)})
     if sc.get("read_only"):
         summary["used_read_only"] = any("--profile read-only" in c for c in commands)
         summary["tree_changed"] = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
@@ -300,7 +322,7 @@ def run_session(out, number, variant, timeout):
 def main():
     ap = argparse.ArgumentParser(description="S6 headless e2e: draft SKILL.md against a control.")
     ap.add_argument("--out", required=True, help="where projects, plugins and events go")
-    ap.add_argument("--scenario", default="all", help="1-9, or all (1-5 run workers; 6-9 schedule through the fake gh and launchctl)")
+    ap.add_argument("--scenario", default="all", help="1-10, or all (1-5 run workers; 6-10 schedule through the fake gh and launchctl)")
     ap.add_argument("--variant", choices=("draft", "control", "both"), default="both")
     ap.add_argument("--timeout", type=int, default=900, help="seconds per session")
     args = ap.parse_args()

@@ -2,6 +2,8 @@
 
 Needs CLAUDE_SKILL_REAL_SCHEDULE_PROJECT: a checkout of a PRIVATE repository whose self-hosted runner runs as a service on this Mac and can read the Claude login (its `schedule` reply lists no `runner.problems`). The test commits workflow files to that repository's default branch, installs LaunchAgents on this Mac, starts real jobs and workers, and removes its schedules again at the end (also when it fails). It takes about 15 minutes.
 
+The one-off has the shape of a name a person gives — underscores, a capital, Korean — so the name's whole path is real: the file GitHub registers, the dispatcher launchd fires, the arguments the runner hands the steps, the worktree group and the summary's title.
+
 Run from tests/: CLAUDE_SKILL_REAL=1 CLAUDE_SKILL_REAL_GITHUB=1 CLAUDE_SKILL_REAL_SCHEDULE_PROJECT=<checkout> python3 -m unittest smoke_real_schedule -v
 """
 
@@ -15,6 +17,7 @@ import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 from support.harness import ENTRY
 
@@ -26,8 +29,9 @@ PROJECT = os.environ.get("CLAUDE_SKILL_REAL_SCHEDULE_PROJECT")
 class RealSchedule(unittest.TestCase):
     def setUp(self):
         self.project = Path(PROJECT).resolve()
-        self.name = f"smoke-{secrets.token_hex(2)}"
-        self.once = f"{self.name}-once"
+        self.token = secrets.token_hex(2)
+        self.name = f"smoke-{self.token}"
+        self.once = f"Smoke_{self.token}_일회성"
         self.addCleanup(self.cleanup)
         self.repo = None
 
@@ -56,11 +60,14 @@ class RealSchedule(unittest.TestCase):
         return proc.stdout
 
     def runs(self, name):
-        return json.loads(self.gh("run", "list", "--repo", self.repo, "--workflow", f"claude-{name}.yml", "--limit", "20", "--json", "databaseId,displayTitle,status,conclusion,event,createdAt"))
+        return json.loads(self.gh("run", "list", "--repo", self.repo, "--workflow", f"{name}.yml", "--limit", "20", "--json", "databaseId,displayTitle,status,conclusion,event,createdAt"))
+
+    def workflow_state(self, name):
+        return json.loads(self.gh("api", f"repos/{self.repo}/actions/workflows/{quote(name + '.yml', safe='')}"))["state"]
 
     def dispatch(self, name, *fields):
         before = {r["databaseId"] for r in self.runs(name)}
-        self.gh("workflow", "run", f"claude-{name}.yml", "--repo", self.repo, *[x for f in fields for x in ("-f", f)])
+        self.gh("workflow", "run", f"{name}.yml", "--repo", self.repo, *[x for f in fields for x in ("-f", f)])
         return self.new_run(name, before, 90)
 
     def new_run(self, name, before, seconds):
@@ -70,7 +77,7 @@ class RealSchedule(unittest.TestCase):
             if fresh:
                 return fresh[0]["databaseId"]
             time.sleep(5)
-        self.fail(f"no new run of claude-{name}.yml within {seconds} s")
+        self.fail(f"no new run of {name}.yml within {seconds} s")
 
     def watch(self, run_id):
         # `gh run watch` can come back before the run ends (seen on a run dispatched seconds earlier), so the end is read from the run itself.
@@ -101,8 +108,8 @@ class RealSchedule(unittest.TestCase):
         self.registry = self.project / ".claude-runs"
         self.assertEqual((reply["workflow"]["status"], reply["dispatcher"]["status"]), ("committed", "installed"), reply)
         self.assertEqual(reply["runner"]["problems"], [], "the runner must be ready for this smoke")
-        state = json.loads(self.gh("api", f"repos/{self.repo}/actions/workflows/claude-{self.name}.yml"))["state"]
-        self.assertEqual(state, "active", "GitHub accepted the workflow file")
+        self.assertEqual(reply["workflow"]["path"], f".github/workflows/{self.name}.yml")
+        self.assertEqual(self.workflow_state(self.name), "active", "GitHub accepted the workflow file")
 
         check = self.dispatch(self.name, "mode=check")
         self.assertEqual(self.watch(check)["conclusion"], "success")
@@ -151,20 +158,30 @@ class RealSchedule(unittest.TestCase):
         self.cli_json("clean", "--group", group, "--force")
 
         at = datetime.now() + timedelta(minutes=3)
-        once = self.schedule(self.once, "Reply with the single word once.", "--at", at.strftime("%Y-%m-%dT%H:%M"), "--profile", "read-only", "--model", "haiku", "--effort", "low")
+        once = self.schedule(self.once, "Reply with the single word once.", "--at", at.strftime("%Y-%m-%dT%H:%M"), "--profile", "write", "--worktree", "--model", "haiku", "--effort", "low")
+        self.assertEqual((once["name"], once["workflow"]["path"]), (self.once, f".github/workflows/Smoke_{self.token}_일회성.yml"))
         label = once["dispatcher"]["label"]
+        self.assertEqual(label, f"claude-schedule.{self.repo.replace('/', '-')}.Smoke_{self.token}_일회성")
+        listed = {r["name"]: r for r in self.cli_json("schedule", "--list")["schedules"]}
+        self.assertEqual((listed[self.once]["file"], listed[self.once]["dispatcher"]), (f"Smoke_{self.token}_일회성.yml", "loaded"))
         before = {r["databaseId"] for r in self.runs(self.once)}
         fired = self.new_run(self.once, before, 300)
-        self.assertEqual(self.watch(fired)["conclusion"], "success")
-        self.assertEqual(json.loads(self.gh("api", f"repos/{self.repo}/actions/workflows/claude-{self.once}.yml"))["state"], "disabled_manually")
+        result = self.watch(fired)
+        self.assertEqual(result["conclusion"], "success")
+        self.assertEqual(result["displayTitle"], f"Smoke_{self.token}_일회성 · dispatcher", "the title in Actions is the name as given")
+        summary, job = self.run_summary(self.once, fired)
+        self.assertEqual(summary.splitlines()[0], f"# ✅ Smoke\\_{self.token}\\_일회성 · completed")
+        self.assertEqual(job["group"], f"smoke-{self.token}-{fired}-1", "the worktree group is the name's ASCII slug")
+        self.assertIn("nothing to keep and was removed", summary)
+        self.assertEqual(self.workflow_state(self.once), "disabled_manually")
         self.assertFalse((Path.home() / "Library" / "LaunchAgents" / f"{label}.plist").exists())
 
         for name in (self.name, self.once):
             gone = self.cli_json("unschedule", "--name", name)
             self.assertIn(gone["workflow"]["status"], ("deleted",), gone)
-        missing = subprocess.run(["gh", "api", f"repos/{self.repo}/contents/.github/workflows/claude-{self.name}.yml"], capture_output=True, text=True)
+        missing = subprocess.run(["gh", "api", f"repos/{self.repo}/contents/.github/workflows/{self.name}.yml"], capture_output=True, text=True)
         self.assertNotEqual(missing.returncode, 0)
-        self.assertFalse(any(p.name.startswith(f"claude-schedule.") and self.name in p.name for p in (Path.home() / "Library" / "LaunchAgents").glob("claude-schedule.*.plist")))
+        self.assertFalse(any(self.token in p.name for p in (Path.home() / "Library" / "LaunchAgents").glob("claude-schedule.*.plist")))
 
 
 if __name__ == "__main__":
