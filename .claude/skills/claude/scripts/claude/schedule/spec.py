@@ -22,7 +22,7 @@ NAME_UNITS = 80
 OLD_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,23}")
 # A group name's length, which a worktree group must fit together with the run id and attempt (K10).
 GROUP_CHARS = 40
-UNSEEN = {"Cc": "a control character", "Zl": "a line separator", "Zp": "a paragraph separator", "Zs": "a space other than the ordinary one", "Cf": "a formatting character that does not show", "Cn": "not a character this Python's Unicode tables know", "Cs": "half of a surrogate pair", "Co": "a private-use character"}
+UNSEEN = {"Cc": "a control character", "Zl": "a line separator", "Zp": "a paragraph separator", "Zs": "a space other than the ordinary one", "Cf": "a formatting character that does not show", "Cs": "half of a surrogate pair", "Co": "a private-use character"}
 LABEL_RULE = re.compile(r"^[A-Za-z0-9._-]+$")
 SCHEDULE_DEFAULTS = {"model": DEFAULTS["model"], "effort": DEFAULTS["effort"], "timeout": 3600, "worktree": False, "runs_on": ["self-hosted"]}
 AT_FORMAT = "%Y-%m-%dT%H:%M"
@@ -59,11 +59,19 @@ def holder_words(held, code=str):
     return f"the dispatcher {code(held['label'])}" + (f" of {code(held['repo'])}" if held["repo"] else ", which names no repository") + f" ({code(held['plist'])})"
 
 
+def _noncharacter(ch):
+    """Whether `ch` is one of the 66 code points Unicode keeps unassigned for good."""
+    n = ord(ch)
+    return 0xFDD0 <= n <= 0xFDEF or n & 0xFFFE == 0xFFFE
+
+
 def _unseen(name):
-    """Why `name` would not show everything it holds, or None. The zero-width joiner and non-joiner stay: emoji sequences and several scripts are written with them."""
+    """Why `name` would not show everything it holds, or None. The zero-width joiner and non-joiner stay: emoji sequences and several scripts are written with them. A code point the Unicode tables leave unassigned stays too, unless it is a noncharacter: it may be a character newer than the tables of the Python that runs this — an emoji of Unicode 16 is unassigned to Python 3.13 — and a name must get the same answer whichever Python `uv run` picks, or `unschedule` could refuse a schedule another Python made."""
     for ch in name:
+        if _noncharacter(ch):
+            return f"U+{ord(ch):04X} is a noncharacter, which Unicode never assigns, and a name must show everything it holds or two names could look the same"
         kind = unicodedata.category(ch)
-        if kind in ("Cc", "Zl", "Zp", "Cn", "Cs", "Co") or (kind == "Zs" and ch != " ") or (kind == "Cf" and ch not in "\u200c\u200d"):
+        if kind in ("Cc", "Zl", "Zp", "Cs", "Co") or (kind == "Zs" and ch != " ") or (kind == "Cf" and ch not in "\u200c\u200d"):
             return f"U+{ord(ch):04X} is {UNSEEN[kind]}, and a name must show everything it holds or two names could look the same"
     if name.startswith(" "):
         return "it starts with a space, which does not show"

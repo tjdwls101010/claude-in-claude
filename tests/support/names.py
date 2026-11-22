@@ -11,6 +11,8 @@ ACCEPTED = [
     "😀" * 40,  # 80 UTF-16 units: an emoji is two
     "nightly-review",  # a name 0.2.0 took
     "a+b&c'd,e@f=g~h!(i)[j]{k}$l;m^n`o",
+    "\U0001fae9 face",  # Unicode 16: the Unicode tables of Pythons before 3.14 do not know it
+    "x\U0002fff0",  # a code point no table knows yet stands for a character newer than the Python reading it
 ]
 
 REFUSED = [
@@ -37,6 +39,8 @@ REFUSED = [
     ("right‮left", "U+202E"),
     ("line separator", "U+2028"),
     ("privateuse", "U+E000"),
+    ("non\ufdd0char", "U+FDD0"),  # noncharacters stay unassigned in every Unicode version
+    ("non\U0002fffechar", "U+2FFFE"),
 ]
 
 # The part before the first dot is a device name on Windows, whatever its case.
