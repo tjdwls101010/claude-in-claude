@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import subprocess
+from urllib.parse import quote
 
 WORKFLOWS = ".github/workflows"
 REMOTE = re.compile(r"^(?:https://(?:[^@/]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+)/([^/]+?)(?:\.git)?/?$")
@@ -24,6 +25,15 @@ class GitHubError(Exception):
 
 def gh_path():
     return shutil.which("gh")
+
+
+def _contents(repo, file):
+    """The Contents API path of a workflow file. gh reads the argument as a URL — `#` starts a fragment, `?` a query, `%` an escape (a raw `a#b.yml` wrote the file `a`) — so a name goes in percent-encoded, as does a branch in `?ref=`."""
+    return f"repos/{repo}/contents/{WORKFLOWS}/{quote(file, safe='')}"
+
+
+def _workflow(repo, file):
+    return f"repos/{repo}/actions/workflows/{quote(file, safe='')}"
 
 
 def _gh(*args, stdin=None, env=None):
@@ -94,7 +104,7 @@ def repo_facts(repo):
 def read_workflow(repo, file, branch):
     """The workflow file on `branch` as `{text, sha, url}`, or None when there is none."""
     try:
-        data = _api(f"repos/{repo}/contents/{WORKFLOWS}/{file}?ref={branch}")
+        data = _api(f"{_contents(repo, file)}?ref={quote(branch, safe='')}")
     except GitHubError as e:
         if e.status == 404:
             return None
@@ -108,20 +118,20 @@ def write_workflow(repo, file, text, message, branch, sha=None):
     body = {"message": message, "content": base64.b64encode(text.encode("utf-8")).decode("ascii"), "branch": branch}
     if sha:
         body["sha"] = sha
-    data = _api(f"repos/{repo}/contents/{WORKFLOWS}/{file}", "PUT", body)
+    data = _api(_contents(repo, file), "PUT", body)
     return {"commit": (data.get("commit") or {}).get("sha"), "url": (data.get("content") or {}).get("html_url")}
 
 
 def delete_workflow(repo, file, message, branch, sha):
     """Delete the workflow file from `branch`; `{commit}`."""
-    data = _api(f"repos/{repo}/contents/{WORKFLOWS}/{file}", "DELETE", {"message": message, "branch": branch, "sha": sha})
+    data = _api(_contents(repo, file), "DELETE", {"message": message, "branch": branch, "sha": sha})
     return {"commit": (data.get("commit") or {}).get("sha")}
 
 
 def workflow_state(repo, file):
     """`active`, `disabled_manually`, … as GitHub reports it, or None when GitHub knows no such workflow."""
     try:
-        return _api(f"repos/{repo}/actions/workflows/{file}").get("state")
+        return _api(_workflow(repo, file)).get("state")
     except GitHubError as e:
         if e.status == 404:
             return None
@@ -129,7 +139,7 @@ def workflow_state(repo, file):
 
 
 def set_workflow_enabled(repo, file, enabled):
-    _api(f"repos/{repo}/actions/workflows/{file}/{'enable' if enabled else 'disable'}", "PUT", empty_ok=True)
+    _api(f"{_workflow(repo, file)}/{'enable' if enabled else 'disable'}", "PUT", empty_ok=True)
 
 
 def list_workflows(repo, prefix):

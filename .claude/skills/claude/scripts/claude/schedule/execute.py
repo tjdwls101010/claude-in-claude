@@ -354,7 +354,8 @@ def _end_one_off(spec, ctx, registry, rec, state):
         current = read_definition(registry, name)
         if current != spec.get("definition"):
             return ["This one-off was scheduled again or removed while it ran, so this run left the newer definition alone."], []
-        file = workflow_file(name)
+        # The file this job's step names: a step written before files took the name as given names claude-NAME.yml, and so is one that names none.
+        file = spec.get("workflow") or workflow_file(name)
         try:
             set_workflow_enabled(repo, file, False)
             notes.append(f"This one-off is done: its workflow is disabled (`gh workflow enable {file} --repo {repo}` and a manual run would run it again; a disabled workflow cannot be re-run).")

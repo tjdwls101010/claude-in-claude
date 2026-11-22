@@ -243,6 +243,16 @@ class Schedule(Scheduling):
         self.assertEqual(words[words.index("--project") + 1], str(odd))
         self.assertIn('    runs-on: ["self-hosted", "123", "true"]', text)
 
+    def test_a_branch_name_reaches_github_whole(self):
+        # In a URL `&` ends a query value and `#` the whole path: read raw, the second call would not find what the first committed.
+        w = self.world()
+        w["repos"][REPO]["default_branch"] = "release&1#x"
+        self.world(w)
+        self.assertEqual(self.new()["workflow"]["status"], "committed")
+        self.assertEqual(self.schedule()["workflow"]["status"], "unchanged")
+        reads = [c["argv"][-1] for c in self.gh_calls() if c["argv"][:3] == ["api", "-X", "GET"] and "/contents/" in c["argv"][-1]]
+        self.assertTrue(reads and all(r.endswith("?ref=release%261%23x") for r in reads), reads)
+
     def test_the_repository_is_named_as_github_spells_it(self):
         git(self.project, "remote", "set-url", "origin", "https://github.com/Someone/Project.git")
         reply = self.new()
@@ -441,11 +451,11 @@ class OneOff(Scheduling):
         self.cli_json("schedule", "--name", "nightly", prompt, "--at", AT, "--profile", profile)
         return json.loads(self.committed().splitlines()[1][len("# spec: "):])
 
-    def job(self, spec, run_id, prompt, source="dispatcher", now=AFTER, event="workflow_dispatch"):
+    def job(self, spec, run_id, prompt, source="dispatcher", now=AFTER, event="workflow_dispatch", workflow="claude-nightly.yml"):
         d = self.root / "job" / run_id
         d.mkdir(parents=True, exist_ok=True)
         env = {"GITHUB_RUN_ID": run_id, "GITHUB_RUN_ATTEMPT": "1", "GITHUB_EVENT_NAME": event, "GITHUB_REPOSITORY": REPO, "GITHUB_SERVER_URL": "https://github.com", "GITHUB_STEP_SUMMARY": str(d / "summary"), "GITHUB_OUTPUT": str(d / "output"), "GH_TOKEN": "job-token", "CLAUDE_SCHEDULE_MODE": "run", "CLAUDE_SCHEDULE_SOURCE": source, "CLAUDE_SCHEDULE_PROMPT": prompt, "CLAUDE_SKILL_TEST_NOW": str(now)}
-        args = ["--name", "nightly", "--project", str(self.project), "--profile", spec["profile"], "--model", spec["model"], "--effort", spec["effort"], "--timeout", str(spec["timeout"]), "--at", spec["at"], "--timezone", spec["timezone"], "--workflow", "claude-nightly.yml", "--definition", spec["definition"]]
+        args = ["--name", "nightly", "--project", str(self.project), "--profile", spec["profile"], "--model", spec["model"], "--effort", spec["effort"], "--timeout", str(spec["timeout"]), "--at", spec["at"], "--timezone", spec["timezone"], *(["--workflow", workflow] if workflow else []), "--definition", spec["definition"]]
         run = self.cli("__scheduled", "run", *args, env=env, timeout=120)
         finish = self.cli("__scheduled", "finish", *args, env=env, timeout=120)
         return run, finish, (d / "summary").read_text() if (d / "summary").exists() else ""
@@ -460,6 +470,20 @@ class OneOff(Scheduling):
         self.assertEqual(self.wf_state(), "disabled_manually")
         self.assertIsNone(self.plist())
         self.assertIn("This one-off is done", summary)
+
+    def test_a_one_off_turns_off_the_workflow_file_its_step_names(self):
+        # A step 0.2.0 wrote names claude-NAME.yml and a later one NAME.yml; each job turns off its own file, and a step naming none is 0.2.0's.
+        for given, off in (("nightly.yml", "nightly.yml"), ("claude-nightly.yml", "claude-nightly.yml"), (None, "claude-nightly.yml")):
+            with self.subTest(workflow=given):
+                self.setUp()
+                spec = self.make()
+                w = self.world()
+                w["repos"][REPO]["workflows"] = {"claude-nightly.yml": "active", "nightly.yml": "active"}
+                self.world(w)
+                run, finish, summary = self.job(spec, "1", "x", workflow=given)
+                self.assertEqual((run.returncode, finish.returncode), (0, 0), finish.stdout)
+                self.assertEqual({f for f, state in self.repo()["workflows"].items() if state != "active"}, {off})
+                self.assertIn(f"gh workflow enable {off} --repo someone/project", summary)
 
     def test_a_failed_read_only_one_off_waits_for_its_retry(self):
         spec = self.make()

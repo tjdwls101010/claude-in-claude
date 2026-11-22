@@ -7,6 +7,8 @@ world.json: {"auth": "ok" | "none" | "noscope", "repos": {"owner/name": {"privat
   protected: a Contents PUT or DELETE gets the 409 a protected branch answered (captured).
   offline: a Contents PUT fails as gh does without a network: a message on stderr, no HTTP status.
   slow: every call first sleeps this many seconds.
+
+An API path is read as gh reads it (Go's net/url; each case captured on a private repository): a `#` starts a fragment that is dropped, the first `?` the query, and every path component and query value is percent-decoded once — so a raw `a#b.yml` names `a` — while an escape that is not two hex digits fails before any request. A Contents GET whose `ref` is not the default branch gets the 404 a missing ref got.
 """
 
 import base64
@@ -17,6 +19,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from urllib.parse import unquote
 
 STATE = Path(os.environ.get("FAKE_GH_STATE", "/tmp/fake-gh"))
 FIXTURES = Path(os.environ.get("FAKE_GH_FIXTURES", Path(__file__).resolve().parent.parent / "fixtures" / "github"))
@@ -144,12 +147,17 @@ if args[:1] != ["api"]:
 method = args[args.index("-X") + 1] if "-X" in args else "GET"
 path = next(a for a in args[1:] if not a.startswith("-") and a not in (method, "-"))
 body = json.loads(stdin) if stdin else {}
-path_only = path.split("?", 1)[0]
+bad = re.search(r"%(?![0-9A-Fa-f]{2}).{0,2}", path)
+if bad:
+    print(f'parse "https://api.github.com/{path}": invalid URL escape "{bad.group(0)}"', file=sys.stderr)
+    sys.exit(1)
+path_only, _, query_text = path.split("#", 1)[0].partition("?")
+query = {k: unquote(v) for k, _, v in (q.partition("=") for q in query_text.split("&") if q)}
 m = re.match(r"^repos/([^/]+/[^/]+)(?:/(.*))?$", path_only)
 if not m:
     print(f"fake gh: unsupported path {path}", file=sys.stderr)
     sys.exit(64)
-repo_name, rest = m.group(1), m.group(2) or ""
+repo_name, rest = m.group(1), "/".join(unquote(part) for part in (m.group(2) or "").split("/"))
 canonical = next((k for k in world["repos"] if k.lower() == repo_name.lower()), None)
 repo = world["repos"].get(canonical) if canonical else None
 if repo is None:
@@ -167,6 +175,8 @@ if c:
     name = fpath.rsplit("/", 1)[-1]
     url = f"https://github.com/{repo_name}/blob/main/{fpath}"
     if method == "GET":
+        if query.get("ref", repo.get("default_branch", "main")) != repo.get("default_branch", "main"):
+            error("contents-get-noref", f"No commit found for the ref {query['ref']}")
         if cur is None:
             answer("contents-get-404")
         answer("contents-get", name=name, path=fpath, sha=cur["sha"], content=base64.b64encode(cur["text"].encode()).decode(), html_url=url)
@@ -228,7 +238,6 @@ if w:
 if rest == "actions/workflows":
     f = json.loads(fixture("workflows-list")["stdout"])
     template = f["workflows"][0]
-    query = dict(q.split("=", 1) for q in (path.split("?", 1)[1].split("&") if "?" in path else []))
     per, page = int(query.get("per_page", 30)), int(query.get("page", 1))
     every = [{**template, "name": file, "path": f".github/workflows/{file}", "state": state} for file, state in sorted(repo.get("workflows", {}).items())]
     f["workflows"] = every[(page - 1) * per : page * per]
