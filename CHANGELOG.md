@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-11-22
+
+A schedule's name is the person's: used as given for its workflow file and its title in Actions.
+
+### Changed
+
+- `schedule --name` takes a name as given — underscores, capitals, any script, emoji, spaces (e.g. `261128_SS_외국인순매수`) — up to 80 characters (an emoji counts as two), in Unicode NFC. It refuses only what breaks something, and says what: `/`, `${{`, a leading `-` or space, characters Windows cannot check out (`\ : * ? " < > |`, a trailing `.` or space), control and invisible characters.
+- A new schedule's workflow is `.github/workflows/NAME.yml` and its title in Actions is `NAME`; neither carries the `claude-` / `claude · ` prefix any more.
+- Schedules 0.2.0 committed keep their file `claude-NAME.yml` and title `claude · NAME`, keep running and are changed in place when `schedule --name NAME` is called again (once committed even when nothing else changed, as the title is now quoted). Renaming means scheduling the new name and unscheduling the old one; to GitHub that is another workflow, and past runs stay with the old one.
+- A new name that differs from another workflow file or schedule only by letter case or Unicode form is refused (on a Mac the two would share one file, state and dispatcher), as is a name Windows reserves (`con`, `nul`, `com1` …).
+- `schedule --list` finds schedules by the skill's header whatever the file is called; each row has `file`, and `state` is `unknown` for a file GitHub has not registered yet.
+- A hand-written `claude-X.yml` no longer blocks `--name X`, which now writes `X.yml`.
+- A `--worktree` run's group and branch are an ASCII slug of the name (`261128-ss-<run id>-1`, or `schedule-<run id>-1` for a name with no ASCII letter or digit).
+- The summary's title shows the name's own characters, and the commands it, the reply and the job's annotations print quote the name and file for the shell.
+
+### Fixed
+
+- `unschedule`, and a one-off's Finish step, could remove the dispatcher plist or local state of another schedule whose path is the same on this Mac (names differing only by case, or labels two repositories share). They now touch only what is this schedule's own, and `schedule` refuses to install over another's.
+- Workflow file names and the branch are percent-encoded on their way to `gh api`, which read `#`, `?` and `%` in them as URL syntax.
+
 ## [0.2.0] — 2026-11-17
 
 Scheduling: a worker that runs unattended at a set time on this Mac, with GitHub Actions as its record and controls.

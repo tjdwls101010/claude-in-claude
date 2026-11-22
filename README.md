@@ -44,7 +44,7 @@ The skill's folder is then, for the plugin, `~/.claude/plugins/cache/claude-in-c
 
 ```json
 "Skill(headless-workers:claude)",
-"Bash(uv run \"/Users/you/.claude/plugins/cache/claude-in-claude/headless-workers/0.2.0/.claude/skills/claude/scripts/cli.py\" *)"
+"Bash(uv run \"/Users/you/.claude/plugins/cache/claude-in-claude/headless-workers/0.3.0/.claude/skills/claude/scripts/cli.py\" *)"
 ```
 
 For the link install the skill is `Skill(claude)` and the path `/Users/you/.claude/skills/claude/scripts/cli.py`. The rule must name the path the way the skill runs it; `doctor` prints it as `invocation`.
@@ -111,6 +111,6 @@ Times are in this Mac's time zone. Each run's page on GitHub shows a summary: th
 
 ## 6. Project Status
 
-Version 0.2.0. Verified on macOS with Claude Code 2.1.314 and a Max subscription; scheduling with gh 2.103 and a self-hosted runner on a private repository. Not included: Linux and Windows verification, scheduling anywhere but macOS and launchd, cron names (`MON`) and intervals under 5 minutes, workers that message each other directly (run rounds with `batch` and `resume` instead), budget and turn limits, forking sessions, image input, and a worktree for a single run. See [CHANGELOG.md](CHANGELOG.md), [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+Version 0.3.0. Verified on macOS with Claude Code 2.1.314 and a Max subscription; scheduling with gh 2.103 and a self-hosted runner on a private repository. Not included: Linux and Windows verification, scheduling anywhere but macOS and launchd, cron names (`MON`) and intervals under 5 minutes, workers that message each other directly (run rounds with `batch` and `resume` instead), budget and turn limits, forking sessions, image input, and a worktree for a single run. See [CHANGELOG.md](CHANGELOG.md), [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 Licensed under the Apache License 2.0.

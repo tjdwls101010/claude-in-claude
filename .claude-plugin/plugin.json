@@ -2,7 +2,7 @@
   "name": "headless-workers",
   "displayName": "Claude in Claude",
   "description": "Run headless Claude Code workers as managed subagents from Claude Code: start one in the background and get a handle at once, read a compact log of what it did, wait for its result in one call that also wakes you when it stalls, retries or hits a rate limit, steer it with a message while it runs, stop and resume it, run several as one group with a git worktree per writer, collect text or schema-shaped JSON, and schedule a worker to run unattended at a set time on this Mac through the repository's self-hosted runner, with GitHub Actions as its record. Each turn is pinned to a read-only, write or auto permission profile; a read-only worker can run your tests while your tree stays untouched.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": {
     "name": "seongjin",
     "url": "https://github.com/tjdwls101010"
