@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -118,6 +119,37 @@ class Claims(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertEqual(registry.read_meta(found[0])["origin"]["slot"], S4)
         self.assertEqual(registry.find_by_origin_job(self.reg, "3-1"), [])
+
+
+class Removal(unittest.TestCase):
+    """A state directory is deleted for the schedule whose name its state.json records, to the letter: on a file system that ignores case, `Nightly` and `nightly` are one directory."""
+
+    def setUp(self):
+        self.reg = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.reg, ignore_errors=True)
+        self.dir = Path(registry.schedule_dir(self.reg, "nightly"))
+
+    def test_its_own_state_goes(self):
+        registry.record_job(self.reg, "nightly", "1-1", {"trigger": "manual", "mode": "run", "profile": "read-only"})
+        self.assertEqual(json.loads((self.dir / "state.json").read_text())["name"], "nightly")
+        self.assertIsNone(registry.remove_schedule_state(self.reg, "nightly"))
+        self.assertFalse(self.dir.exists())
+
+    def test_another_schedules_state_stays(self):
+        self.dir.mkdir(parents=True)
+        (self.dir / "state.json").write_text(json.dumps({"name": "NIGHTLY", "last_slot": None, "slots": {}, "jobs": {}}))
+        self.assertEqual(registry.remove_schedule_state(self.reg, "nightly"), "NIGHTLY")
+        self.assertTrue((self.dir / "state.json").exists())
+
+    def test_a_directory_that_names_no_schedule_goes(self):
+        for content in (None, "{not json", json.dumps({"jobs": {}})):
+            with self.subTest(content=content):
+                self.dir.mkdir(parents=True)
+                (self.dir / "summary-1-1.md").write_text("x")
+                if content is not None:
+                    (self.dir / "state.json").write_text(content)
+                self.assertIsNone(registry.remove_schedule_state(self.reg, "nightly"))
+                self.assertFalse(self.dir.exists())
 
 
 if __name__ == "__main__":

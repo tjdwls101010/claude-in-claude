@@ -8,13 +8,13 @@ from pathlib import Path
 from claude.errors import Refusal
 from claude.git import main_checkout, remote_url, toplevel
 from claude.github import GitHubError, delete_workflow, gh_status, list_workflows, local_runners, parse_spec, read_workflow, render_workflow, repo_facts, repo_from_remote, runner_problems, runners, set_workflow_enabled, workflow_file, workflow_state, write_workflow
-from claude.launchd import agent_state, calendar_entries, install_agent, list_agents, remove_agent, render_agent, supported, system_timezone
-from claude.registry import latest_job, read_meta, remove_schedule_state, resolve_runs_dir, schedule_lock, schedule_runs_live, write_definition
+from claude.launchd import agent_state, agents_dir, calendar_entries, install_agent, list_agents, remove_agent, render_agent, supported, system_timezone
+from claude.registry import latest_job, read_meta, remove_schedule_state, resolve_runs_dir, schedule_dir, schedule_lock, schedule_runs_live, schedule_state_holder, write_definition
 from claude.runs import refuse_inside_worker
 from claude.util import entry_path, iso
 
 from .execute import clock, local_time
-from .spec import check_name, dispatcher_label, fields_of, merge
+from .spec import check_name, dispatcher_holder, dispatcher_label, fields_of, merge
 from .times import fire_times
 
 PREFIX = "claude-"
@@ -121,9 +121,19 @@ def schedule(*, name, flags, cwd, dry_run=False, public_ok=False, message=None):
                 return same, current["text"]
         return spec, render_workflow(spec)
 
+    def refuse_held():
+        """This Mac's dispatcher plist path and state directory must be free or this schedule's own, or installing and recording would overwrite another schedule's."""
+        held = dispatcher_holder(repo, name)
+        if held:
+            raise Refusal(f"the dispatcher of {name} would go where this Mac keeps {held}", instead="choose another --name; if that plist is a leftover, delete it and schedule again")
+        held = schedule_state_holder(registry, name)
+        if held:
+            raise Refusal(f"the state of {name} would go where this Mac keeps the state of schedule {held} ({schedule_dir(registry, name)})", instead="choose another --name")
+
     def refusals_first():
-        """The refusals that need only what GitHub already holds, checked before the lock — which creates the registry — so a refusal writes nothing on this Mac."""
+        """The refusals that need only what GitHub and this Mac already hold, checked before the lock — which creates the registry — so a refusal writes nothing on this Mac."""
         current, recorded = _existing(repo, file, branch)
+        refuse_held()
         return build(current, recorded)
 
     def derived(spec):
@@ -141,6 +151,7 @@ def schedule(*, name, flags, cwd, dry_run=False, public_ok=False, message=None):
     with schedule_lock(registry, name):
         now = clock()
         current, recorded = _existing(repo, file, branch)
+        refuse_held()
         spec, text = build(current, recorded)
         status = "unchanged"
         commit = url = None
@@ -218,7 +229,17 @@ def unschedule(*, name, cwd, message=None):
             current, reply["workflow"] = None, {"status": "failed", "path": f".github/workflows/{file}", "error": e.message}
         if current is not None and (parse_spec_or_none(current["text"]) or {}).get("name") != name:
             raise Refusal(f".github/workflows/{file} was not written by this skill; unschedule leaves it alone")
-        reply["dispatcher"] = remove_agent(dispatcher_label(repo, name))
+        label = dispatcher_label(repo, name)
+        plist_held, state_held = dispatcher_holder(repo, name), schedule_state_holder(registry, name)
+        if current is None and "workflow" not in reply and (plist_held or state_held):
+            raise Refusal(f"{repo} has no schedule {name}, and what this Mac keeps under that name is another schedule's: " + (plist_held or f"the state of schedule {state_held} ({schedule_dir(registry, name)})") + "; nothing was removed")
+        notes = []
+        if plist_held:
+            # The path holds another schedule's plist: this schedule has no dispatcher on this Mac.
+            reply["dispatcher"] = {"status": "absent", "label": label, "plist": str(agents_dir() / f"{label}.plist")}
+            notes.append(f"the dispatcher plist path holds {plist_held}, which was left alone")
+        else:
+            reply["dispatcher"] = remove_agent(label)
         if "workflow" not in reply:
             if current is None:
                 reply["workflow"] = {"status": "absent", "path": f".github/workflows/{file}"}
@@ -229,12 +250,16 @@ def unschedule(*, name, cwd, message=None):
                 except GitHubError as e:
                     reply["workflow"] = {"status": "failed", "path": f".github/workflows/{file}", "error": e.message}
         live = schedule_runs_live(registry, name)
-        if live:
+        if state_held:
+            notes.append(f"the state directory under that name is schedule {state_held}'s and was left alone")
+        elif live:
             # The live run's Finish still needs its job's hand-over; only the definition goes, so it will not disable anything (K8).
             write_definition(registry, name, None)
-            reply["note"] = f"run(s) {', '.join(live)} of this schedule are still live, so its local state is kept until they end; `gh run cancel <id> --repo {repo}` cancels a job"
+            notes.append(f"run(s) {', '.join(live)} of this schedule are still live, so its local state is kept until they end; `gh run cancel <id> --repo {repo}` cancels a job")
         else:
             remove_schedule_state(registry, name)
+        if notes:
+            reply["note"] = "; ".join(notes)
     return reply
 
 
@@ -286,5 +311,6 @@ def schedules(*, cwd):
             row["last"] = {"job": job, "at": iso(rec.get("at")), "slot": iso(rec.get("slot")), "run_id": rec.get("run_id"), "state": state, "outcome": (rec.get("outcome") or {}).get("kind"), "url": rec.get("url")}
         out.append(row)
     prefix = dispatcher_label(repo, "")
-    orphans = [{"label": l, "plist": str(Path(os.path.expanduser("~")) / "Library" / "LaunchAgents" / f"{l}.plist")} for l in list_agents(prefix) if l[len(prefix):] not in names]
+    # Only plists that are this repository's own: the prefix also matches another repository's labels, and a path can hold another label's plist.
+    orphans = [{"label": l, "plist": str(agents_dir() / f"{l}.plist")} for l in list_agents(prefix) if l[len(prefix):] not in names and dispatcher_holder(repo, l[len(prefix):]) is None]
     return {"repo": repo, "schedules": out, "orphans": orphans}

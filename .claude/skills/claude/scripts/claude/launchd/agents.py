@@ -9,6 +9,7 @@ import subprocess
 import sys
 from itertools import product
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 # A dispatcher with more calendar entries than this is refused; ask for a coarser time (K6).
 CALENDAR_LIMIT = 500
@@ -64,9 +65,31 @@ def render_agent(label, argv, calendar, log):
     return plistlib.dumps({"Label": label, "ProgramArguments": list(argv), "StartCalendarInterval": calendar, "StandardOutPath": str(log), "StandardErrorPath": str(log), "RunAtLoad": False, "ProcessType": "Background"}).decode("utf-8")
 
 
-def install_agent(label, argv, calendar, log):
-    """Write the agent's plist to ~/Library/LaunchAgents and load it, replacing a loaded one of the same label. Returns `{status: installed, label, plist}`, or `{status: failed, label, plist, error}`."""
+def agent_identity(label):
+    """Whose plist sits at `label`'s path: `{label, argv, plist}` from its `Label` and `ProgramArguments` (`label` None and `argv` empty when it cannot be read), or None when there is no file. One label's path can hold another's agent: this file system ignores letter case and Unicode form, and launchd's labels do not."""
     path = agents_dir() / f"{label}.plist"
+    try:
+        data = plistlib.loads(path.read_bytes())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, ExpatError):
+        data = None
+    there, argv = (data.get("Label"), data.get("ProgramArguments")) if isinstance(data, dict) else (None, None)
+    return {"label": there if isinstance(there, str) else None, "argv": [str(a) for a in argv] if isinstance(argv, list) else [], "plist": str(path)}
+
+
+def _foreign(label):
+    """The identity at `label`'s path when it is not `label`'s own, else None."""
+    held = agent_identity(label)
+    return held if held is not None and held["label"] != label else None
+
+
+def install_agent(label, argv, calendar, log):
+    """Write the agent's plist to ~/Library/LaunchAgents and load it, replacing its own earlier one. Returns `{status: installed, label, plist}`, or `{status: failed, label, plist, error}` — also when the path holds another agent's plist or one that cannot be read, which is left as it is."""
+    path = agents_dir() / f"{label}.plist"
+    other = _foreign(label)
+    if other:
+        return {"status": "failed", "label": label, "plist": str(path), "error": f"{path} holds " + (f"the plist of another agent, {other['label']}" if other["label"] else "a plist that cannot be read") + "; it was left alone"}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         Path(log).parent.mkdir(parents=True, exist_ok=True)
@@ -81,20 +104,23 @@ def install_agent(label, argv, calendar, log):
 
 
 def remove_agent(label):
-    """Unload the agent and delete its plist. `{status: removed | absent | failed, label, plist}` (with `error` when failed)."""
+    """Unload the agent and delete its plist. `{status: removed | absent | failed, label, plist}` (with `error` when failed). A plist at its path that is another agent's, or cannot be read, is left as it is, and the reply then carries `other`: that agent's label, None for an unreadable one."""
     path = agents_dir() / f"{label}.plist"
+    other = _foreign(label)
+    reply = {"label": label, "plist": str(path), **({"other": other["label"]} if other else {})}
     loaded = agent_state(label) == "loaded"
-    if not loaded and not path.exists():
-        return {"status": "absent", "label": label, "plist": str(path)}
+    if not loaded and (other or not path.exists()):
+        return {"status": "absent", **reply}
     if loaded:
         code, err = _launchctl("bootout", f"{_domain()}/{label}")
         if code != 0 and agent_state(label) == "loaded":
-            return {"status": "failed", "label": label, "plist": str(path), "error": f"launchctl bootout exited {code}: {err}"}
-    try:
-        path.unlink(missing_ok=True)
-    except OSError as e:
-        return {"status": "failed", "label": label, "plist": str(path), "error": f"could not delete the plist: {e}"}
-    return {"status": "removed", "label": label, "plist": str(path)}
+            return {"status": "failed", **reply, "error": f"launchctl bootout exited {code}: {err}"}
+    if not other:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            return {"status": "failed", **reply, "error": f"could not delete the plist: {e}"}
+    return {"status": "removed", **reply}
 
 
 def agent_state(label):

@@ -67,6 +67,20 @@ class Scheduling(Sandbox):
         p = self.home / "Library" / "LaunchAgents" / f"{label}.plist"
         return plistlib.loads(p.read_bytes()) if p.exists() else None
 
+    def plant_plist(self, label=LABEL, repo=REPO, at=None, raw=None):
+        """A dispatcher plist as `schedule` writes one, put at the path of label `at` (default: its own) — which is where a file system that ignores case, or a label two repositories share, puts another schedule's."""
+        path = self.home / "Library" / "LaunchAgents" / f"{at or label}.plist"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        argv = ["/opt/homebrew/bin/gh", "workflow", "run", "x.yml", *(["--repo", repo] if repo else []), "--ref", "main", "-f", "source=dispatcher"]
+        path.write_bytes(raw if raw is not None else plistlib.dumps({"Label": label, "ProgramArguments": argv}))
+        return path, path.read_bytes()
+
+    def plant_state(self, recorded, name="nightly"):
+        d = self.runs_dir() / ".schedules" / name
+        d.mkdir(parents=True)
+        (d / "state.json").write_text(json.dumps({"name": recorded, "last_slot": None, "slots": {}, "jobs": {}}))
+        return d / "state.json"
+
     def schedule(self, *args, expect=0, input=None):
         return self.cli_json("schedule", "--name", "nightly", *args, expect=expect, input=input)
 
@@ -401,6 +415,62 @@ class Unschedule(Scheduling):
         self.cli_json("stop", "--run", reply["run_id"])
 
 
+class Ownership(Scheduling):
+    """This Mac's dispatcher plist and state directory are touched only when they are this schedule's: a label joins owner, repository and name without marking where each ends, and the file system ignores letter case and Unicode form, so another schedule's can sit at the same path."""
+
+    def test_schedule_refuses_a_dispatcher_path_another_schedule_holds(self):
+        for what, plant, says in (("another repository's", {"repo": "some/one-project"}, "some/one-project"), ("another label's", {"label": LABEL.upper()}, LABEL.upper()), ("names no repository", {"repo": None}, ".plist"), ("unreadable", {"raw": b"not a plist"}, ".plist")):
+            for extra in ((), ("--dry-run",)):
+                with self.subTest(what=what, extra=extra):
+                    self.setUp()
+                    path, before = self.plant_plist(at=LABEL, **plant)
+                    reply = self.new(*extra, expect=1)
+                    self.assertIn(says, reply["error"])
+                    self.assertIsNone(self.committed())
+                    self.assertEqual(path.read_bytes(), before)
+                    self.assertFalse(self.runs_dir().exists(), "a refusal leaves no registry behind")
+
+    def test_schedule_refuses_a_state_directory_another_schedule_holds(self):
+        state = self.plant_state("NIGHTLY")
+        before = state.read_text()
+        reply = self.new(expect=1)
+        self.assertIn("NIGHTLY", reply["error"])
+        self.assertIsNone(self.committed())
+        self.assertIsNone(self.plist())
+        self.assertEqual(state.read_text(), before)
+
+    def test_unschedule_removes_nothing_of_another_schedule(self):
+        path, before = self.plant_plist(repo="some/one-project")
+        reply = self.cli_json("unschedule", "--name", "nightly", expect=1)
+        self.assertIn("some/one-project", reply["error"])
+        self.assertEqual(path.read_bytes(), before)
+        path.unlink()
+        state = self.plant_state("NIGHTLY")
+        reply = self.cli_json("unschedule", "--name", "nightly", expect=1)
+        self.assertIn("NIGHTLY", reply["error"])
+        self.assertTrue(state.exists())
+
+    def test_unschedule_removes_its_own_leftovers(self):
+        path, _ = self.plant_plist()
+        state = self.plant_state("nightly")
+        reply = self.cli_json("unschedule", "--name", "nightly")
+        self.assertEqual((reply["dispatcher"]["status"], reply["workflow"]["status"]), ("removed", "absent"))
+        self.assertFalse(path.exists())
+        self.assertFalse(state.exists())
+
+    def test_unschedule_of_a_committed_schedule_leaves_what_is_not_its_own(self):
+        self.new()
+        path, before = self.plant_plist(repo="some/one-project")
+        state = self.runs_dir() / ".schedules" / "nightly" / "state.json"
+        state.write_text(json.dumps({**json.loads(state.read_text()), "name": "NIGHTLY"}))
+        reply = self.cli_json("unschedule", "--name", "nightly")
+        self.assertEqual((reply["workflow"]["status"], reply["dispatcher"]["status"]), ("deleted", "absent"))
+        self.assertIn("some/one-project", reply["note"])
+        self.assertIn("NIGHTLY", reply["note"])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertTrue(state.exists())
+
+
 class Listing(Scheduling):
     def test_list(self):
         self.new()
@@ -408,7 +478,12 @@ class Listing(Scheduling):
         w = self.world()
         w["repos"][REPO]["workflows"]["claude-weekly.yml"] = "disabled_manually"
         self.world(w)
-        (self.home / "Library" / "LaunchAgents" / "claude-schedule.someone-project.gone.plist").write_bytes(plistlib.dumps({"Label": "claude-schedule.someone-project.gone"}))
+        self.plant_plist(label="claude-schedule.someone-project.gone")
+        # Not this repository's orphans: a label two repositories share, one a case-blind file system put under another's name, and plists that do not say.
+        self.plant_plist(label="claude-schedule.someone-project.theirs", repo="some/one-project")
+        self.plant_plist(label="claude-schedule.someone-project.CASE", at="claude-schedule.someone-project.case")
+        self.plant_plist(label="claude-schedule.someone-project.norepo", repo=None)
+        self.plant_plist(label="claude-schedule.someone-project.garbage", raw=b"not a plist")
         text = self.committed().replace(str(ENTRY), "/nowhere/cli.py")
         w = self.world()
         w["repos"][REPO]["files"][".github/workflows/claude-nightly.yml"]["text"] = text
@@ -526,6 +601,16 @@ class OneOff(Scheduling):
         run, finish, summary = self.job(spec, "1", "x")
         self.assertEqual(self.wf_state(), "active", "nothing of a removed definition is disabled")
         self.assertIn("left the newer definition alone", summary)
+
+    def test_a_one_off_leaves_a_dispatcher_that_is_not_its_own(self):
+        spec = self.make()
+        path, before = self.plant_plist(repo="some/one-project")
+        run, finish, summary = self.job(spec, "1", "x")
+        self.assertEqual(finish.returncode, 0, finish.stdout)
+        self.assertEqual(self.wf_state(), "disabled_manually", "its own workflow is still turned off")
+        self.assertEqual(path.read_bytes(), before)
+        warning = summary.split("[!WARNING]", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("some/one-project", warning)
 
     def test_calling_again_after_the_time_needs_a_new_time(self):
         spec = self.make()

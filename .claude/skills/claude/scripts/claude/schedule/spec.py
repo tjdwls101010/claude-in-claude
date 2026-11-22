@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from claude.errors import Refusal
 from claude.github import unsafe_text
-from claude.launchd import calendar_entries
+from claude.launchd import agent_identity, calendar_entries
 from claude.runs import DEFAULTS
 
 from .times import CronError, fire_times, parse_cron
@@ -30,6 +30,21 @@ def dispatcher_label(repo, name):
     """The LaunchAgent label of schedule `name` of `owner/repo`."""
     owner, rname = repo.split("/", 1)
     return f"claude-schedule.{owner}-{rname}.{name}"
+
+
+def dispatcher_holder(repo, name):
+    """Who else holds the path of this schedule's dispatcher plist on this Mac, in words, or None when the path is free or holds this schedule's own — a plist whose `Label` is this label to the letter and whose command dispatches to this repository. A label joins owner, repository and name without marking where each ends, and the file system ignores letter case and Unicode form, so another schedule's plist can sit there; one that cannot be read, or names no repository, is not known to be this schedule's."""
+    label = dispatcher_label(repo, name)
+    found = agent_identity(label)
+    if found is None:
+        return None
+    argv = found["argv"]
+    target = argv[argv.index("--repo") + 1] if "--repo" in argv[:-1] else None
+    if found["label"] == label and target == repo:
+        return None
+    if found["label"] is None:
+        return f"a plist that cannot be read ({found['plist']})"
+    return f"the dispatcher {found['label']}" + (f" of {target}" if target else ", which names no repository") + f" ({found['plist']})"
 
 
 def check_name(name):

@@ -27,7 +27,7 @@ from claude.registry import claim_slot, claude_alive, find_by_origin_job, group_
 from claude.runs import start, stop
 from claude.util import entry_path, invocation
 
-from .spec import dispatcher_label
+from .spec import dispatcher_holder, dispatcher_label
 from .summary import render_summary
 from .times import current_slot
 
@@ -361,9 +361,13 @@ def _end_one_off(spec, ctx, registry, rec, state):
             notes.append(f"This one-off is done: its workflow is disabled (`gh workflow enable {file} --repo {repo}` and a manual run would run it again; a disabled workflow cannot be re-run).")
         except GitHubError as e:
             warnings.append(f"The one-off's workflow could not be disabled ({e.message}); `gh workflow disable {file} --repo {repo}` does it.")
-        gone = remove_agent(dispatcher_label(repo, name))
-        if gone["status"] == "failed":
-            warnings.append(f"The one-off's dispatcher could not be removed ({gone.get('error')}); `unschedule --name {name}` removes it.")
+        held = dispatcher_holder(repo, name)
+        if held:
+            warnings.append(f"The one-off's dispatcher was not removed: its plist path on this Mac holds {held}, which was left alone.")
+        else:
+            gone = remove_agent(dispatcher_label(repo, name))
+            if gone["status"] == "failed":
+                warnings.append(f"The one-off's dispatcher could not be removed ({gone.get('error')}); `unschedule --name {name}` removes it.")
     return notes, warnings
 
 
