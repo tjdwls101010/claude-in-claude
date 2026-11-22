@@ -45,6 +45,8 @@ class Spec(unittest.TestCase):
         self.assertIsNone(github.parse_spec('# spec: {"name": "x"}\nname: not ours\n'), "a spec line without the skill's header is not ours")
         with self.assertRaises(ValueError):
             github.parse_spec(HAND_WRITTEN.splitlines()[0] + "\n# spec: [1, 2]\n")
+        for name in ('["x"]', "7", '""', "null", '{"a": 1}'):
+            self.assertIsNone(github.parse_spec(HAND_WRITTEN.splitlines()[0] + f'\n# spec: {{"name": {name}}}\n'), f"a spec whose name is {name} names no schedule")
 
     def test_round_trip(self):
         tricky = {**SPEC, "prompt": "  indented first line\n\ttab and ${{ secrets.X }} and $HOME and `ticks` and 'quotes' \"too\"\n\n한글 줄\ntrailing spaces   \n\n\n"}

@@ -133,7 +133,7 @@ def render_workflow(spec):
 
 
 def parse_spec(text):
-    """The definition a workflow's `# spec:` line holds, or None when the workflow is not one this skill wrote: its first line is not the skill's header, or it has no spec line, or the spec names no schedule. ValueError when the line is there but is not a JSON object."""
+    """The definition a workflow's `# spec:` line holds, or None when the workflow is not one this skill wrote: its first line is not the skill's header, or it has no spec line, or the spec's `name` is not a non-empty string. ValueError when the line is there but is not a JSON object."""
     if not (text or "").startswith(HEADER + "\n"):
         return None
     for line in (text or "").splitlines():
@@ -141,5 +141,5 @@ def parse_spec(text):
             obj = json.loads(line[len(SPEC_PREFIX):])
             if not isinstance(obj, dict):
                 raise ValueError("the spec line does not hold a JSON object")
-            return obj if obj.get("name") else None
+            return obj if isinstance(obj.get("name"), str) and obj["name"] else None
     return None

@@ -274,17 +274,16 @@ class Schedule(Scheduling):
         self.assertEqual(reply["dispatcher"]["label"], LABEL)
         self.assertIsNotNone(self.plist())
 
-    def test_many_workflows_are_all_listed(self):
+    def test_the_state_of_a_workflow_on_a_later_page_is_read(self):
         self.new()
         w = self.world()
         for n in range(150):
-            w["repos"][REPO]["workflows"][f"build-{n:03d}.yml"] = "active"  # sorted before claude-nightly.yml, so it lands on page 2
+            w["repos"][REPO]["workflows"][f"build-{n:03d}.yml"] = "active"  # sorted before the schedule's file, which lands on page 2
+        w["repos"][REPO]["workflows"]["claude-nightly.yml"] = "disabled_manually"
         self.world(w)
-        rows = self.cli_json("schedule", "--list")["schedules"]
-        self.assertEqual([r["name"] for r in rows], ["nightly"])
-        w["repos"][REPO]["workflows"]["zzz.yml"] = "active"
-        self.world(w)
-        self.assertEqual(self.cli_json("schedule", "--list")["orphans"], [])
+        out = self.cli_json("schedule", "--list")
+        self.assertEqual([(r["name"], r["state"]) for r in out["schedules"]], [("nightly", "disabled")])
+        self.assertEqual(out["orphans"], [])
 
     def test_runner_problems_come_from_this_mac(self):
         rdir = self.root / "actions-runner"
@@ -472,6 +471,47 @@ class Ownership(Scheduling):
 
 
 class Listing(Scheduling):
+    HEADER = "# Written by the claude skill's `schedule` command. Run it again with the same --name to change it; `unschedule` removes it."
+
+    def plant(self, file, text, state="active", **extra):
+        """A workflow file on the default branch, as if committed from somewhere else; `state` None for one GitHub has not registered."""
+        w = self.world()
+        w["repos"][REPO]["files"][f".github/workflows/{file}"] = {"text": text, "sha": "abc", **extra}
+        if state:
+            w["repos"][REPO]["workflows"][file] = state
+        self.world(w)
+
+    def ours(self, name):
+        spec = {"at": None, "cli": str(ENTRY), "cron": "0 9 * * 1", "definition": "3f9a1c2e", "effort": "high", "model": "sonnet", "name": name, "profile": "write", "project": str(self.project), "prompt": "x", "runs_on": ["self-hosted"], "schema": None, "timeout": 3600, "timezone": TZ, "worktree": False}
+        return f"{self.HEADER}\n# spec: {json.dumps(spec, ensure_ascii=False, sort_keys=True)}\nname: anything\non: workflow_dispatch\n"
+
+    def test_schedules_are_found_by_their_header_whatever_the_file_is_called(self):
+        self.plant("claude-nightly.yml", self.ours("nightly"))  # as 0.2.0 named files
+        self.plant("261128_SS_외국인순매수.yml", self.ours("261128_SS_외국인순매수"), state="disabled_manually")
+        self.plant("weekly.yaml", self.ours("weekly"), state=None)
+        self.plant("b-second.yml", self.ours("same name"))
+        self.plant("a-first.yml", self.ours("same name"))
+        self.plant("ci.yml", "name: ci\non: push\n")
+        self.plant("claude-code-review.yml", "name: review\non: pull_request\n")
+        self.plant("spec-no-header.yml", "# spec: {\"name\": \"x\"}\nname: x\n")
+        self.plant("spec-not-an-object.yml", f"{self.HEADER}\n# spec: [1]\n")
+        self.plant("name-is-a-list.yml", f"{self.HEADER}\n# spec: {{\"name\": [\"x\"]}}\n")
+        self.plant("sub/inner.yml", self.ours("inner"), state=None)
+        out = self.cli_json("schedule", "--list")
+        self.assertEqual([(r["name"], r["file"], r["state"]) for r in out["schedules"]], [
+            ("261128_SS_외국인순매수", "261128_SS_외국인순매수.yml", "disabled"),
+            ("nightly", "claude-nightly.yml", "active"),
+            ("same name", "a-first.yml", "active"),
+            ("same name", "b-second.yml", "active"),
+            ("weekly", "weekly.yaml", "unknown"),
+        ])
+        self.assertEqual(list(out["schedules"][0])[:2], ["name", "file"])
+        self.assertEqual(len([c for c in self.gh_calls() if c["argv"][:2] == ["api", "graphql"]]), 1, "one call brings every file's name and body")
+
+    def test_a_body_the_listing_did_not_bring_is_read_on_its_own(self):
+        self.plant("nightly.yml", self.ours("nightly"), graphql="none")
+        self.assertEqual([r["name"] for r in self.cli_json("schedule", "--list")["schedules"]], ["nightly"])
+
     def test_list(self):
         self.new()
         self.cli_json("schedule", "--name", "weekly", "y", "--cron", "0 9 * * 1", "--profile", "write")

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from claude.errors import Refusal
 from claude.git import main_checkout, remote_url, toplevel
-from claude.github import GitHubError, delete_workflow, gh_status, list_workflows, local_runners, parse_spec, read_workflow, render_workflow, repo_facts, repo_from_remote, runner_problems, runners, set_workflow_enabled, workflow_file, workflow_state, write_workflow
+from claude.github import GitHubError, delete_workflow, gh_status, list_workflow_files, local_runners, parse_spec, read_workflow, render_workflow, repo_facts, repo_from_remote, runner_problems, runners, set_workflow_enabled, workflow_file, workflow_state, workflow_states, write_workflow
 from claude.launchd import agent_state, agents_dir, calendar_entries, install_agent, list_agents, remove_agent, render_agent, supported, system_timezone
 from claude.registry import latest_job, read_meta, remove_schedule_state, resolve_runs_dir, schedule_dir, schedule_lock, schedule_runs_live, schedule_state_holder, write_definition
 from claude.runs import refuse_inside_worker
@@ -280,21 +280,21 @@ def schedules(*, cwd):
     registry = resolve_runs_dir(project)
     out, names = [], set()
     try:
-        found = list_workflows(repo, PREFIX)
+        # A schedule is a file that starts with the skill's header and carries its spec line, whatever it is called.
+        files = list_workflow_files(repo, facts["default_branch"])
+        states = workflow_states(repo)
     except GitHubError as e:
         raise Refusal(f"the workflows could not be listed: {e.message}")
-    for w in found:
-        try:
-            current = read_workflow(repo, w["file"], facts["default_branch"])
-            spec = parse_spec(current["text"]) if current else None
-        except (GitHubError, ValueError):
-            spec = None
-        if not spec:
-            continue
-        name = spec["name"]
+    found = []
+    for f in files:
+        spec = parse_spec_or_none(f["text"])
+        if spec:
+            found.append((spec["name"], f["file"], spec))
+    for name, file, spec in sorted(found, key=lambda x: x[:2]):
         names.add(name)
         last = latest_job(registry, name)
-        row = {"name": name, "cron": spec.get("cron"), "at": spec.get("at"), "timezone": spec.get("timezone"), "profile": spec.get("profile"), "state": "active" if w["state"] == "active" else "disabled", "dispatcher": "loaded" if agent_state(dispatcher_label(repo, name)) == "loaded" else "missing"}
+        state = states.get(file)
+        row = {"name": name, "file": file, "cron": spec.get("cron"), "at": spec.get("at"), "timezone": spec.get("timezone"), "profile": spec.get("profile"), "state": "unknown" if state is None else "active" if state == "active" else "disabled", "dispatcher": "loaded" if agent_state(dispatcher_label(repo, name)) == "loaded" else "missing"}
         stale = [p for p in (spec.get("cli"), spec.get("project")) if p and not Path(p).exists()]
         row["stale_entry"] = bool(stale)
         if stale:
