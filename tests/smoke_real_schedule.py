@@ -73,8 +73,14 @@ class RealSchedule(unittest.TestCase):
         self.fail(f"no new run of claude-{name}.yml within {seconds} s")
 
     def watch(self, run_id):
-        subprocess.run(["gh", "run", "watch", str(run_id), "--repo", self.repo], capture_output=True, timeout=1200)
-        return json.loads(self.gh("run", "view", str(run_id), "--repo", self.repo, "--json", "conclusion,displayTitle"))
+        # `gh run watch` can come back before the run ends (seen on a run dispatched seconds earlier), so the end is read from the run itself.
+        end = time.time() + 1200
+        while True:
+            subprocess.run(["gh", "run", "watch", str(run_id), "--repo", self.repo], capture_output=True, timeout=1200)
+            run = json.loads(self.gh("run", "view", str(run_id), "--repo", self.repo, "--json", "status,conclusion,displayTitle"))
+            if run["status"] == "completed" or time.time() > end:
+                return run
+            time.sleep(5)
 
     def state(self, name):
         return json.loads((self.registry / ".schedules" / name / "state.json").read_text())
