@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import shlex
 import shutil
 import threading
 import time
@@ -27,8 +28,8 @@ from claude.registry import claim_slot, claude_alive, find_by_origin_job, group_
 from claude.runs import start, stop
 from claude.util import entry_path, invocation
 
-from .spec import dispatcher_holder, dispatcher_label, worktree_group
-from .summary import render_summary
+from .spec import dispatcher_holder, dispatcher_label, holder_words, worktree_group
+from .summary import code_span, render_summary
 from .times import current_slot
 
 # A one-off's automatic triggers more than this after its time do nothing: GitHub drops a queued job after 24 hours, and a cron without a year would otherwise fire again a year later (K4).
@@ -154,7 +155,7 @@ def scheduled_run(spec, env, write):
     project = spec["project"]
     if not Path(project).is_dir():
         # K23: nothing is written, since the registry would be created at a path that no longer exists.
-        step.command(annotation("error", f"{name}: project missing", f"{project} is not a directory on this runner; if the project moved, run `schedule --name {name} --project <new path>` again"))
+        step.command(annotation("error", f"{name}: project missing", f"{project} is not a directory on this runner; if the project moved, run `schedule --name {shlex.quote(name)} --project <new path>` again"))
         return 1
     registry = resolve_runs_dir(project)
     job = ctx["job"]
@@ -357,16 +358,16 @@ def _end_one_off(spec, ctx, registry, rec, state):
         file = spec.get("workflow") or legacy_workflow_file(name)
         try:
             set_workflow_enabled(repo, file, False)
-            notes.append(f"This one-off is done: its workflow is disabled (`gh workflow enable {file} --repo {repo}` and a manual run would run it again; a disabled workflow cannot be re-run).")
+            notes.append(f"This one-off is done: its workflow is disabled ({code_span(f'gh workflow enable {shlex.quote(file)} --repo {repo}')} and a manual run would run it again; a disabled workflow cannot be re-run).")
         except GitHubError as e:
-            warnings.append(f"The one-off's workflow could not be disabled ({e.message}); `gh workflow disable {file} --repo {repo}` does it.")
+            warnings.append(f"The one-off's workflow could not be disabled ({e.message}); {code_span(f'gh workflow disable {shlex.quote(file)} --repo {repo}')} does it.")
         held = dispatcher_holder(repo, name)
         if held:
-            warnings.append(f"The one-off's dispatcher was not removed: its plist path on this Mac holds {held}, which was left alone.")
+            warnings.append(f"The one-off's dispatcher was not removed: its plist path on this Mac holds {holder_words(held, code_span)}, which was left alone.")
         else:
             gone = remove_agent(dispatcher_label(repo, name))
             if gone["status"] == "failed":
-                warnings.append(f"The one-off's dispatcher could not be removed ({gone.get('error')}); `unschedule --name {name}` removes it.")
+                warnings.append(f"The one-off's dispatcher could not be removed ({gone.get('error')}); {code_span(f'unschedule --name {shlex.quote(name)}')} removes it.")
     return notes, warnings
 
 
@@ -405,7 +406,7 @@ def scheduled_finish(spec, env, write):
     base = {"name": name, "timezone": spec["timezone"], "prompt": env.get("CLAUDE_SCHEDULE_PROMPT")}
     if not Path(project).is_dir():
         # K23: no registry to keep anything in; GitHub gets the summary.
-        text = render_summary(None, {**base, "at": clock(), "outcome": {"kind": "missing", "title": "project missing", "error": f"{project} is not a directory on this runner.", "instead": f"If the project moved, run `schedule --name {name} --project <new path>` again."}})
+        text = render_summary(None, {**base, "at": clock(), "outcome": {"kind": "missing", "title": "project missing", "error": f"{project} is not a directory on this runner.", "instead": f"If the project moved, run {code_span(f'schedule --name {shlex.quote(name)} --project <new path>')} again."}})
         return _post(step, name, ctx, text)
     registry = resolve_runs_dir(project)
     rec = (read_job(registry, name, job) if job else None) or {}

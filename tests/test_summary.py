@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import html
 import json
+import re
 import shutil
 import tempfile
 import unittest
@@ -179,6 +181,28 @@ class Rendered(unittest.TestCase):
         self.assertLess(len(text.encode()), 900_000)
         self.assertEqual(text.count("<details"), text.count("</details>"))
         self.assertIn("<b>Continue on your Mac</b>", text)
+
+    def test_a_name_shows_in_the_title_as_its_characters(self):
+        # A name is the person's and may hold what markdown reads as emphasis, a link, a tag, an autolink or math. The title is the markdown that was sent to GitHub's renderer (fixture .md), and the fixture .html is what came back.
+        name = "_a_ *b* [c](x) <e> @octocat #1 www.x.com $a$ ~s~ `t` &amp; 1. x! \"q\" 'r' {k} a|b c\\d e^f g=h i+j k;l m:n o/p q?r 100% nightly-docs"
+        text = schedule.render_summary(self.run_dir(), self.context(name=name))
+        self.assertEqual(text.splitlines()[0] + "\n", (FIXTURES / "summary" / "title-escaped.md").read_text())
+        shown = (FIXTURES / "summary" / "title-escaped.html").read_text()
+        self.assertEqual(html.unescape(re.sub(r"<[^>]+>", "", shown)).strip(), f"✅ {name} · completed", "GitHub showed the name's own characters")
+        self.assertEqual(set(re.findall(r"<(\w[\w-]*)", shown)), {"h1", "span", "a"}, "and made nothing of them but the spans around `$` and a link")
+        self.assertEqual(re.findall(r"<a [^>]*>([^<]*)</a>", shown), ["@octocat"], "a mention is still linked; its text is unchanged")
+
+    def test_every_kind_of_title_writes_the_name_the_same_way(self):
+        for outcome, title in (({"kind": "skipped", "reason": "this slot already ran", "previous": {}}, "# ⏭ 261128\\_SS\\_외국인순매수 · skipped"), ({"kind": "check", "ok": True, "checks": []}, "# 🔎 261128\\_SS\\_외국인순매수 · check passed"), ({"kind": "refused", "title": "not started", "error": "x"}, "# ❌ 261128\\_SS\\_외국인순매수 · not started")):
+            text = schedule.render_summary(None, self.context(name="261128_SS_외국인순매수", outcome=outcome, at=STARTED))
+            self.assertEqual(text.splitlines()[0], title)
+        failed = schedule.render_summary(self.run_dir(state="failed", error="x"), self.context(name="a*b"))
+        self.assertEqual(failed.splitlines()[0], "# ❌ a\\*b · failed")
+
+    def test_inline_code_outlasts_any_run_of_backticks(self):
+        text = schedule.render_summary(self.run_dir(), self.context(tree={"kind": "checkout", "branch": "fix``x`y", "head": "abc1234", "uncommitted_before": 0}))
+        row = next(l for l in text.splitlines() if l.startswith("| **Local tree**"))
+        self.assertIn("``` fix``x`y ``` @ `abc1234`", row)
 
     def test_table_rows_escape_pipes_in_branch_names(self):
         text = schedule.render_summary(self.run_dir(), self.context(tree={"kind": "checkout", "branch": "fix|x", "head": "abc1234", "uncommitted_before": 0}))

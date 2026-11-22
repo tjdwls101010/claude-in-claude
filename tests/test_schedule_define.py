@@ -789,15 +789,15 @@ class OneOff(Scheduling):
     """K8: a one-off turns itself off when its time will not be tried again, and only the definition it was started from."""
 
 
-    def make(self, profile="read-only", prompt="x"):
-        self.cli_json("schedule", "--name", "nightly", prompt, "--at", AT, "--profile", profile)
-        return json.loads(self.committed().splitlines()[1][len("# spec: "):])
+    def make(self, profile="read-only", prompt="x", name="nightly"):
+        self.cli_json("schedule", "--name", name, prompt, "--at", AT, "--profile", profile)
+        return self.spec_of(name)
 
-    def job(self, spec, run_id, prompt, source="dispatcher", now=AFTER, event="workflow_dispatch", workflow="nightly.yml"):
+    def job(self, spec, run_id, prompt, source="dispatcher", now=AFTER, event="workflow_dispatch", workflow="nightly.yml", extra=None):
         d = self.root / "job" / run_id
         d.mkdir(parents=True, exist_ok=True)
-        env = {"GITHUB_RUN_ID": run_id, "GITHUB_RUN_ATTEMPT": "1", "GITHUB_EVENT_NAME": event, "GITHUB_REPOSITORY": REPO, "GITHUB_SERVER_URL": "https://github.com", "GITHUB_STEP_SUMMARY": str(d / "summary"), "GITHUB_OUTPUT": str(d / "output"), "GH_TOKEN": "job-token", "CLAUDE_SCHEDULE_MODE": "run", "CLAUDE_SCHEDULE_SOURCE": source, "CLAUDE_SCHEDULE_PROMPT": prompt, "CLAUDE_SKILL_TEST_NOW": str(now)}
-        args = ["--name", "nightly", "--project", str(self.project), "--profile", spec["profile"], "--model", spec["model"], "--effort", spec["effort"], "--timeout", str(spec["timeout"]), "--at", spec["at"], "--timezone", spec["timezone"], *(["--workflow", workflow] if workflow else []), "--definition", spec["definition"]]
+        env = {"GITHUB_RUN_ID": run_id, "GITHUB_RUN_ATTEMPT": "1", "GITHUB_EVENT_NAME": event, "GITHUB_REPOSITORY": REPO, "GITHUB_SERVER_URL": "https://github.com", "GITHUB_STEP_SUMMARY": str(d / "summary"), "GITHUB_OUTPUT": str(d / "output"), "GH_TOKEN": "job-token", "CLAUDE_SCHEDULE_MODE": "run", "CLAUDE_SCHEDULE_SOURCE": source, "CLAUDE_SCHEDULE_PROMPT": prompt, "CLAUDE_SKILL_TEST_NOW": str(now), **(extra or {})}
+        args = ["--name", spec["name"], "--project", str(self.project), "--profile", spec["profile"], "--model", spec["model"], "--effort", spec["effort"], "--timeout", str(spec["timeout"]), "--at", spec["at"], "--timezone", spec["timezone"], *(["--workflow", workflow] if workflow else []), "--definition", spec["definition"]]
         run = self.cli("__scheduled", "run", *args, env=env, timeout=120)
         finish = self.cli("__scheduled", "finish", *args, env=env, timeout=120)
         return run, finish, (d / "summary").read_text() if (d / "summary").exists() else ""
@@ -884,6 +884,28 @@ class OneOff(Scheduling):
         self.job(spec, "1", "x")
         reply = self.cli_json("schedule", "--name", "nightly", "--model", "opus", expect=2, env={"CLAUDE_SKILL_TEST_NOW": str(AFTER + 3600)})
         self.assertIn("give a new --at", reply["error"])
+
+    def test_commands_in_the_summary_survive_an_awkward_name(self):
+        # A name may hold spaces and backticks: the command a reader copies is quoted for the shell and sits in a code span longer than any run of backticks in it.
+        name = "a`b``c d"
+        spec = self.make(name=name)
+        run, finish, summary = self.job(spec, "1", "x", workflow=f"{name}.yml", extra={"FAKE_LAUNCHCTL_FAIL": "bootout"})
+        self.assertEqual(finish.returncode, 0, finish.stdout)
+        self.assertEqual(self.repo()["workflows"], {"a`b``c d.yml": "disabled_manually"})
+        self.assertIn("(``` gh workflow enable 'a`b``c d.yml' --repo someone/project ``` and a manual run would run it again", summary)
+        self.assertIn("``` unschedule --name 'a`b``c d' ``` removes it.", summary)
+        self.world(fail_disable=True)
+        self.setUp()
+        spec = self.make(name=name)
+        self.world(fail_disable=True)
+        run, finish, summary = self.job(spec, "1", "x", workflow=f"{name}.yml")
+        self.assertIn("``` gh workflow disable 'a`b``c d.yml' --repo someone/project ``` does it.", summary)
+
+    def test_a_dispatcher_left_alone_is_named_as_code(self):
+        spec = self.make()
+        path, _ = self.plant_plist(label="claude-schedule.someone-project._NIGHTLY_", at=LABEL)
+        run, finish, summary = self.job(spec, "1", "x")
+        self.assertIn(f"holds the dispatcher `claude-schedule.someone-project._NIGHTLY_` of `someone/project` (`{path}`), which was left alone.", summary)
 
     def test_a_failed_disable_names_the_command(self):
         spec = self.make()

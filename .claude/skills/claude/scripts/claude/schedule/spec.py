@@ -40,7 +40,7 @@ def dispatcher_label(repo, name):
 
 
 def dispatcher_holder(repo, name):
-    """Who else holds the path of this schedule's dispatcher plist on this Mac, in words, or None when the path is free or holds this schedule's own — a plist whose `Label` is this label to the letter and whose command dispatches to this repository. A label joins owner, repository and name without marking where each ends, and the file system ignores letter case and Unicode form, so another schedule's plist can sit there; one that cannot be read, or names no repository, is not known to be this schedule's."""
+    """Who else holds the path of this schedule's dispatcher plist on this Mac, as `{label, repo, plist}` (see `holder_words`), or None when the path is free or holds this schedule's own — a plist whose `Label` is this label to the letter and whose command dispatches to this repository. A label joins owner, repository and name without marking where each ends, and the file system ignores letter case and Unicode form, so another schedule's plist can sit there; one that cannot be read (`label` None), or names no repository (`repo` None), is not known to be this schedule's."""
     label = dispatcher_label(repo, name)
     found = agent_identity(label)
     if found is None:
@@ -49,9 +49,14 @@ def dispatcher_holder(repo, name):
     target = argv[argv.index("--repo") + 1] if "--repo" in argv[:-1] else None
     if found["label"] == label and target == repo:
         return None
-    if found["label"] is None:
-        return f"a plist that cannot be read ({found['plist']})"
-    return f"the dispatcher {found['label']}" + (f" of {target}" if target else ", which names no repository") + f" ({found['plist']})"
+    return {"label": found["label"], "repo": target, "plist": found["plist"]}
+
+
+def holder_words(held, code=str):
+    """Whoever `dispatcher_holder` found, in words. `code` writes the label, repository and path — as they are for a JSON reply, as inline code for markdown."""
+    if held["label"] is None:
+        return f"a plist that cannot be read ({code(held['plist'])})"
+    return f"the dispatcher {code(held['label'])}" + (f" of {code(held['repo'])}" if held["repo"] else ", which names no repository") + f" ({code(held['plist'])})"
 
 
 def _unseen(name):

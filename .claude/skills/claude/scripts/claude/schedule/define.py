@@ -15,7 +15,7 @@ from claude.runs import refuse_inside_worker
 from claude.util import entry_path, iso, path_key
 
 from .execute import clock, local_time
-from .spec import bad, check_name, dispatcher_holder, dispatcher_label, fields_of, merge, was_old_name
+from .spec import bad, check_name, dispatcher_holder, dispatcher_label, fields_of, holder_words, merge, was_old_name
 from .times import fire_times
 
 
@@ -165,7 +165,7 @@ def schedule(*, name, flags, cwd, dry_run=False, public_ok=False, message=None):
         """This Mac's dispatcher plist path and state directory must be free or this schedule's own, or installing and recording would overwrite another schedule's."""
         held = dispatcher_holder(repo, name)
         if held:
-            raise Refusal(f"the dispatcher of {name} would go where this Mac keeps {held}", instead="choose another --name; if that plist is a leftover, delete it and schedule again")
+            raise Refusal(f"the dispatcher of {name} would go where this Mac keeps {holder_words(held)}", instead="choose another --name; if that plist is a leftover, delete it and schedule again")
         held = schedule_state_holder(registry, name)
         if held:
             raise Refusal(f"the state of {name} would go where this Mac keeps the state of schedule {held} ({schedule_dir(registry, name)})", instead="choose another --name")
@@ -270,12 +270,12 @@ def unschedule(*, name, cwd, message=None):
         label = dispatcher_label(repo, name)
         plist_held, state_held = dispatcher_holder(repo, name), schedule_state_holder(registry, name)
         if current is None and "workflow" not in reply and (plist_held or state_held):
-            raise Refusal(f"{repo} has no schedule {name}, and what this Mac keeps under that name is another schedule's: " + (plist_held or f"the state of schedule {state_held} ({schedule_dir(registry, name)})") + "; nothing was removed")
+            raise Refusal(f"{repo} has no schedule {name}, and what this Mac keeps under that name is another schedule's: " + (holder_words(plist_held) if plist_held else f"the state of schedule {state_held} ({schedule_dir(registry, name)})") + "; nothing was removed")
         notes = []
         if plist_held:
             # The path holds another schedule's plist: this schedule has no dispatcher on this Mac.
             reply["dispatcher"] = {"status": "absent", "label": label, "plist": str(agents_dir() / f"{label}.plist")}
-            notes.append(f"the dispatcher plist path holds {plist_held}, which was left alone")
+            notes.append(f"the dispatcher plist path holds {holder_words(plist_held)}, which was left alone")
         else:
             reply["dispatcher"] = remove_agent(label)
         if "workflow" not in reply:

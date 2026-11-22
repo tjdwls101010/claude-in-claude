@@ -159,6 +159,13 @@ class Ends(Job):
         self.assertIn("project missing", summary.splitlines()[0])
         self.assertIn("--project <new path>", summary)
 
+    def test_the_project_gone_names_the_call_with_the_name_quoted(self):
+        run, finish, summary = self.job(self.job_env(), project=self.root / "moved-away", name="weekly report")
+        self.assertIn("::error title=weekly report%3A project missing::", run.stdout)
+        self.assertIn("run `schedule --name 'weekly report' --project <new path>` again", run.stdout)
+        self.assertEqual(summary.splitlines()[0], "# ❌ weekly report · project missing")
+        self.assertIn("run `schedule --name 'weekly report' --project <new path>` again.", summary)
+
     def test_an_unreadable_run_fails_the_finish_step_but_leaves_a_summary(self):
         env = self.job_env(prompt="x")
         self.assertEqual(self.step("run", env).returncode, 0)

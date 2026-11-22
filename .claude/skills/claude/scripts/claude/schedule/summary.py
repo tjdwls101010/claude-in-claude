@@ -68,13 +68,24 @@ def _size(n):
     return f"{n / 1024 / 1024:.1f} MB"
 
 
-def _code(text, table=False):
-    """Inline code that survives backticks, and in a table cell its pipes (GitHub drops the backslash there, and shows it anywhere else)."""
+# ASCII punctuation markdown can read as markup. `-` is left out: inside a line it means nothing. `$` is handled apart.
+MARKUP = "!\"#%&'()*+,./:;<=>?@[\\]^_`{|}~"
+
+
+def _literal(text):
+    """`text` as markdown that shows its own characters: a backslash before ASCII punctuation, which stops emphasis, links, tags and `www.` autolinks, and `$` in a `<span>` of its own, since GitHub's math reads a dollar pair even behind backslashes. A mention or an issue reference is still linked; its text does not change."""
+    return "".join("<span>$</span>" if ch == "$" else "\\" + ch if ch in MARKUP else ch for ch in text)
+
+
+def code_span(text, table=False):
+    """Inline code, delimited by more backticks than any run inside it, and in a table cell with its pipes escaped (GitHub drops the backslash there, and shows it anywhere else)."""
     if table:
         text = text.replace("|", "\\|")
-    if "`" not in text:
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    if not longest:
         return f"`{text}`"
-    return f"`` {text} ``"
+    ticks = "`" * (longest + 1)
+    return f"{ticks} {text} {ticks}"
 
 
 def _cell(text):
@@ -118,7 +129,7 @@ def _cut(text, limit, what, how):
 
 def _title(snapshot, context):
     outcome = context.get("outcome") or {}
-    name = context["name"]
+    name = _literal(context["name"])
     if snapshot is None:
         kind = outcome.get("kind")
         if kind == "skipped":
@@ -154,14 +165,14 @@ def _tree_text(tree):
     tree = tree or {}
     kind = tree.get("kind")
     if kind == "worktree":
-        return f"worktree {_code(tree['path'], True)} on {_code(tree.get('branch') or '?', True)} from {_code((tree.get('base') or '')[:7], True)}, a clean checkout of that commit; your checkout is not touched"
+        return f"worktree {code_span(tree['path'], True)} on {code_span(tree.get('branch') or '?', True)} from {code_span((tree.get('base') or '')[:7], True)}, a clean checkout of that commit; your checkout is not touched"
     if kind == "checkout":
-        where = f"{_code(tree['branch'], True)}" if tree.get("branch") else "detached HEAD"
+        where = f"{code_span(tree['branch'], True)}" if tree.get("branch") else "detached HEAD"
         n = tree.get("uncommitted_before")
         state = "clean when the run began" if not n else f"{n} uncommitted file{'s' if n != 1 else ''} when the run began"
-        return f"{where} @ {_code((tree.get('head') or '')[:7], True)}, {state} (not the commit GitHub shows for this run)"
+        return f"{where} @ {code_span((tree.get('head') or '')[:7], True)}, {state} (not the commit GitHub shows for this run)"
     if kind == "none":
-        return f"{_code(tree.get('path') or '?', True)}, not a git checkout"
+        return f"{code_span(tree.get('path') or '?', True)}, not a git checkout"
     return "unknown"
 
 
@@ -169,7 +180,7 @@ def _run_text(snapshot):
     meta, header = snapshot["meta"], snapshot["header"]
     settings = meta.get("settings") or {}
     init = meta.get("init") or {}
-    parts = [_code(settings.get("profile") or "?", True), _cell(f"{init.get('model') or settings.get('model')} / {settings.get('effort')}")]
+    parts = [code_span(settings.get("profile") or "?", True), _cell(f"{init.get('model') or settings.get('model')} / {settings.get('effort')}")]
     if meta.get("started_at") and meta.get("ended_at"):
         parts.append(_duration(meta["ended_at"] - meta["started_at"]))
     calls = sum((header.get("tool_calls") or {}).values())
@@ -199,7 +210,7 @@ def _alerts(snapshot, context):
         meta, header = snapshot["meta"], snapshot["header"]
         state = meta.get("state")
         if state in RED:
-            caution.append({"failed": "**The run failed.**", "timed_out": "**The run timed out.**", "orphaned": "**The run's supervisor died before recording an outcome.**"}[state] + (f" {_code(_one_line(meta.get('error'), 300))}" if meta.get("error") else ""))
+            caution.append({"failed": "**The run failed.**", "timed_out": "**The run timed out.**", "orphaned": "**The run's supervisor died before recording an outcome.**"}[state] + (f" {code_span(_one_line(meta.get('error'), 300))}" if meta.get("error") else ""))
             last = (snapshot.get("text") or "").strip()
             if last:
                 caution.append(f"Last message: {_one_line(last, 300)}")
@@ -214,7 +225,7 @@ def _alerts(snapshot, context):
         if denials:
             n = len(denials)
             warning.append(f"**{n} permission denial{'s' if n != 1 else ''}.** The worker tried something its profile does not allow.")
-            warning += [f"- {_code(d.get('tool') or '?')} {_code(_one_line(_target(d.get('tool'), d.get('input')), 200))}" for d in denials[:20]]
+            warning += [f"- {code_span(d.get('tool') or '?')} {code_span(_one_line(_target(d.get('tool'), d.get('input')), 200))}" for d in denials[:20]]
         if meta.get("mode_mismatch"):
             mode = (meta.get("init") or {}).get("permission_mode")
             profile = (meta.get("settings") or {}).get("profile")
@@ -306,23 +317,23 @@ def _changes(snapshot, context):
     body = [_fence("\n".join(lines), "text")] if lines else ["Nothing changed."]
     moved = ch.get("head_moved")
     if moved:
-        body.append(f"HEAD moved during the run: {_code(moved['from'])} → {_code(moved['to'])}" + (f", {moved['commits']} commit{'s' if moved['commits'] != 1 else ''}." if moved["commits"] else ", no new commit."))
+        body.append(f"HEAD moved during the run: {code_span(moved['from'])} → {code_span(moved['to'])}" + (f", {moved['commits']} commit{'s' if moved['commits'] != 1 else ''}." if moved["commits"] else ", no new commit."))
     if ch.get("not_git"):
         edited, listed, used = ch["not_git"], [], 0
         for path in edited[: _limit(context, "change_rows", CHANGE_ROWS)]:
             if used > CHANGE_BYTES:
                 break
-            listed.append(f"- {_code(path)}")
+            listed.append(f"- {code_span(path)}")
             used += len(listed[-1].encode("utf-8"))
         if len(edited) > len(listed):
             listed.append(f"- … and {len(edited) - len(listed)} more")
         body = ["Not a git checkout, so only what the edit tools wrote is known; files a shell command wrote are not here:", "\n".join(listed) or "- none"]
     if ch.get("kept"):
         k = ch["kept"]
-        body.append(f"The worktree is kept because it holds these changes: {_code(k['path'])} on branch {_code(k['branch'])}. Move what you need into your tree, then `{k['clean']}`.")
+        body.append(f"The worktree is kept because it holds these changes: {code_span(k['path'])} on branch {code_span(k['branch'])}. Move what you need into your tree, then `{k['clean']}`.")
     elif ch.get("branch_kept"):
         b = ch["branch_kept"]
-        body.append(f"The worktree was removed; its branch {_code(b['branch'])} keeps the commits (`git log {b['branch']}`).")
+        body.append(f"The worktree was removed; its branch {code_span(b['branch'])} keeps the commits (`git log {b['branch']}`).")
     elif ch.get("removed"):
         body.append("The worktree had nothing to keep and was removed.")
     if not ch.get("not_git") and ch.get("kind") != "worktree":
@@ -352,11 +363,11 @@ def _step_cell(row):
 def _detail_cell(row):
     k = row["kind"]
     if k == "denied":
-        return f"{_code(row['tool'] or '?', True)} {_code(_one_line(_target(row['tool'], row['input'])), True)}"
+        return f"{code_span(row['tool'] or '?', True)} {code_span(_one_line(_target(row['tool'], row['input'])), True)}"
     if k == "mcp":
-        return _code(f"{row['server']}/{row['name']}", True)
+        return code_span(f"{row['server']}/{row['name']}", True)
     if k == "tool":
-        return f"{_code(row['tool'] or '?', True)} {_code(_one_line(row['detail']), True)}"
+        return f"{code_span(row['tool'] or '?', True)} {code_span(_one_line(row['detail']), True)}"
     if k == "retry":
         return _cell(f"attempt {row['attempt']}/{row['max_retries']} · {_one_line(row['error'])} {row['error_status'] or ''}".rstrip())
     if k == "task":
@@ -365,7 +376,7 @@ def _detail_cell(row):
         return f"{row['subtype']} · {row['num_turns']} turns"
     if k == "compact":
         return "the conversation was compacted"
-    return _code(_one_line(row.get("detail") or ""), True)
+    return code_span(_one_line(row.get("detail") or ""), True)
 
 
 def _activity(snapshot, context, cuts):
