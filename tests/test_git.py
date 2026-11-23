@@ -65,6 +65,13 @@ class Repo(unittest.TestCase):
         git(empty, "init", "-q")
         self.assertIsNone(g.head_commit(str(empty)))
 
+    def test_remote_url_is_the_configured_one(self):
+        self.assertIsNone(g.remote_url(str(self.repo)))
+        git(self.repo, "remote", "add", "origin", "https://github.com/someone/project.git")
+        # A rewrite changes where git connects, not which repository the remote names.
+        git(self.repo, "config", "url./elsewhere/mirror.git.insteadOf", "https://github.com/someone/project.git")
+        self.assertEqual(g.remote_url(str(self.repo)), "https://github.com/someone/project.git")
+
     def test_paths_are_nfc(self):
         decomposed = self.root / "café"
         make_repo(decomposed)

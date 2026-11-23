@@ -64,6 +64,6 @@ def current_branch(path):
 
 
 def remote_url(path, name="origin"):
-    """The URL of the remote `name` of the repository at `path`, or None."""
-    code, out, _ = run_git(path, "remote", "get-url", name)
+    """The URL of the remote `name` of the repository at `path` as configured, or None. Not `remote get-url`, which applies `url.*.insteadOf`: a rewrite changes where git connects, not which repository the remote names."""
+    code, out, _ = run_git(path, "config", "--get", f"remote.{name}.url")
     return out.strip() if code == 0 and out.strip() else None
