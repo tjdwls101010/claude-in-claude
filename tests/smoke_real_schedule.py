@@ -124,6 +124,42 @@ class RealSchedule(unittest.TestCase):
             time.sleep(3)
         self.fail(f"the worker of run {gh_run} did not start")
 
+    def test_a_worktree_whose_pull_request_merged_goes(self):
+        # K30 cleanup on the real runner: GitHub is asked about the worktree's commit with the person's login (the job's token cannot read pull requests).
+        reply = self.schedule(self.name, "Run the shell command: sleep 90 — then reply with the single word done.", "--cron", "0 4 1 1 *", "--profile", "write", "--worktree", "--model", "haiku", "--effort", "low", "--timeout", "600")
+        self.repo = reply["repo"]
+        self.registry = self.project / ".claude-runs"
+        run = self.dispatch(self.name)
+        self.started(self.name, run)
+        group = self.state(self.name)["jobs"][f"{run}-1"]["group"]
+        wt = self.project / ".claude" / "worktrees" / f"{group}-1"
+        branch = f"smoke-pr-{self.token}"
+
+        def in_wt(*args):
+            return subprocess.run(args, cwd=wt, capture_output=True, text=True, timeout=120, check=True).stdout.strip()
+
+        (wt / f"smoke-pr-{self.token}.md").write_text("merged by a pull request\n")
+        in_wt("git", "switch", "-q", "-c", branch)
+        in_wt("git", "add", f"smoke-pr-{self.token}.md")
+        in_wt("git", "commit", "-q", "-m", f"smoke: {branch}")
+        head = in_wt("git", "rev-parse", "HEAD")
+        in_wt("git", "push", "-q", "origin", branch)
+        url = in_wt("gh", "pr", "create", "--repo", self.repo, "--base", "main", "--head", branch, "--title", f"smoke: {branch}", "--body", "temporary, from the skill's smoke test")
+        number = int(url.rstrip("/").rsplit("/", 1)[1])
+        in_wt("gh", "pr", "merge", str(number), "--repo", self.repo, "--squash", "--delete-branch")
+        (wt / "scratch.txt").write_text("left uncommitted\n")
+        self.assertEqual(self.watch(run)["conclusion"], "success")
+        summary, _ = self.run_summary(self.name, run)
+        self.assertIn(f"its work is on GitHub (#{number})", summary, summary[:3000])
+        self.assertFalse(wt.exists())
+        ref = f"refs/claude/leftovers/{group}-1"
+        self.assertEqual(self.git("show", f"{ref}:scratch.txt"), "left uncommitted")
+        self.assertEqual(self.git("show", f"{ref}^^:smoke-pr-{self.token}.md"), "merged by a pull request", "the leftovers sit on the commit that was merged")
+        self.assertEqual(self.git("branch", "--list", branch), "")
+        self.assertTrue((self.project / f"smoke-pr-{self.token}.md").exists(), "and the merge is in the checkout")
+        self.git("update-ref", "-d", ref)
+        self.assertTrue(head)
+
     def test_what_lands_on_github_reaches_the_checkout(self):
         # K30, on the real runner: its service must reach GitHub with the person's login (the job's token, which git would otherwise use, cannot read the repository).
         reply = self.schedule(self.name, "Run the shell command: sleep 60 — then reply with the single word done.", "--cron", "0 4 1 1 *", "--profile", "read-only", "--model", "haiku", "--effort", "low", "--timeout", "600")
