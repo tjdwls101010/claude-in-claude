@@ -31,6 +31,7 @@ __all__ = [
     "schedule_runs_live",
     "schedule_state",
     "schedule_state_holder",
+    "sync_lock",
     "update_job",
     "write_definition",
     "group_view",
@@ -46,4 +47,4 @@ __all__ = [
 from .inbox import close, enqueue, pending, take
 from .runs import ACTIVE, TERMINAL, claude_alive, ensure_runs_dir, find_run, is_live, iter_runs, live_runs, publish_run, read_meta, reap, record_if_active, registry_args, resolve_runs_dir, session_lock, supervisor_alive, update_meta
 from .groups import claim_group, group_view, list_groups, record_member, record_members, release_group, valid_group_name
-from .schedules import claim_slot, find_by_origin_job, latest_job, read_definition, read_job, record_job, remove_schedule_state, schedule_dir, schedule_lock, schedule_runs_live, schedule_state, schedule_state_holder, update_job, write_definition
+from .schedules import claim_slot, find_by_origin_job, latest_job, read_definition, read_job, record_job, remove_schedule_state, schedule_dir, schedule_lock, schedule_runs_live, schedule_state, schedule_state_holder, sync_lock, update_job, write_definition

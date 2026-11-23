@@ -1,4 +1,4 @@
-"""A scheduled job's two steps on the runner (K1): `Run` starts the worker and holds the job until it ends; `Finish`, which GitHub runs after any end — success, failure, a cancel, a timeout — stops what is still alive, records what changed, cleans up and writes the summary.
+"""A scheduled job's two steps on the runner (K1): `Run` starts the worker and holds the job until it ends; `Finish`, which GitHub runs after any end — success, failure, a cancel, a timeout — stops what is still alive, records what changed, brings the project's checkout up to what GitHub's default branch holds (K30), cleans up and writes the summary.
 
 Run, in order (K28): the project must exist (K23); a check only checks (K13); an automatic trigger decides and claims its slot (K4), any other job is recorded; refusals that cost nothing come before the worker; the worker is started under the schedule's origin; the step follows it to its end, printing its activity and warning on attention without stopping it; the exit code is the run's outcome.
 
@@ -28,6 +28,7 @@ from claude.registry import claim_slot, claude_alive, find_by_origin_job, group_
 from claude.runs import start, stop
 from claude.util import entry_path, invocation
 
+from .local import left_alone, sync_local
 from .spec import dispatcher_holder, dispatcher_label, holder_words, worktree_group
 from .summary import code_span, render_summary
 from .times import current_slot
@@ -397,6 +398,18 @@ def _post(step, name, ctx, text):
     return 0
 
 
+def _bring_local(spec, ctx, registry, run_id, unconfirmed):
+    """K30: the project's checkout brought up to what GitHub's default branch now holds — what the worker merged there included — unless the schedule says `--no-pull`, or the worker works in that checkout and could not be confirmed stopped. Never raises; the reply is `git.sync_default`'s, or `{status: off}`."""
+    if spec.get("pull") is False:
+        return {"status": "off"}
+    if unconfirmed and not spec.get("worktree"):
+        return left_alone(spec["project"], "the worker works in this checkout and could not be confirmed stopped")
+    try:
+        return sync_local(spec["project"], registry, expect_repo=ctx.get("repository"), skip_run=run_id)
+    except (OSError, Refusal) as e:
+        return left_alone(spec["project"], f"the update could not be tried: {getattr(e, 'message', None) or e}") | {"status": "failed"}
+
+
 def scheduled_finish(spec, env, write):
     """The Finish step, run after any end of the job (K20): stop a worker still alive, read what changed, clean up a worktree that holds nothing, keep the summary beside the run and post it to the job. Returns 1 only when the worker could not be confirmed stopped or the step summary could not be written; every other failure is a warning in the summary."""
     step = Step(write)
@@ -467,6 +480,8 @@ def scheduled_finish(spec, env, write):
             changes = _changes(spec, rec, meta, (snap or {}).get("header", {}).get("files_edited") or [])
         except OSError as e:
             warnings.append(f"What changed could not be read: {e}")
+    # After the changes are read, so what comes in from GitHub is not counted as the run's (K27).
+    local = _bring_local(spec, ctx, registry, run_id, unconfirmed)
     if changes is not None:
         changes.update(_clean_group(rec.get("group"), job, registry, project, warnings))
     notes, ended = _end_one_off(spec, ctx, registry, rec, (meta or {}).get("state"))
@@ -474,7 +489,7 @@ def scheduled_finish(spec, env, write):
     if unconfirmed:
         warnings.insert(0, f"**The worker could not be confirmed stopped:** {unconfirmed}. Check this Mac, and `{invocation('stop', '--run', run_id, '--project', project)}`.")
     rel = os.path.relpath(run_dir, project)
-    context = {**base, "notes": notes, "tree": _tree(spec, rec, meta), "changes": changes, "attention": rec.get("attention") or [], "stopped_by_finish": stopped_by_finish, "continue": {"cli": entry_path(), "project": project, "run_dir": (run_dir if rel.startswith("..") else rel) + "/"}, "log_call": invocation("log", "--run", run_id, "--project", project)}
+    context = {**base, "notes": notes, "tree": _tree(spec, rec, meta), "changes": changes, "attention": rec.get("attention") or [], "local": local, "stopped_by_finish": stopped_by_finish, "continue": {"cli": entry_path(), "project": project, "run_dir": (run_dir if rel.startswith("..") else rel) + "/"}, "log_call": invocation("log", "--run", run_id, "--project", project)}
     if snap is None:
         context.update({"at": clock(), "outcome": {"kind": "none", "title": "unreadable run", "error": f"Run {run_id} cannot be read."}})
     text = _render_kept(snap, context, warnings, str(Path(run_dir) / "summary.md"))
@@ -485,6 +500,8 @@ def scheduled_finish(spec, env, write):
             write_output(ctx["output_path"], {"run_id": run_id, "state": state})
         except OSError:
             pass
+    if local.get("status") in ("not_updated", "failed"):
+        step.command(annotation("warning", f"{name}: checkout not updated", local.get("reason") or local["status"]))
     if (state in RED and not stopped_by_finish) or (snap is not None and state == "completed" and snap["schema"] and snap["json"] is None):
         step.command(annotation("error", f"{name} failed", (meta or {}).get("error") or state))
     if unconfirmed:
