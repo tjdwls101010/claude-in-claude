@@ -13,6 +13,7 @@ What a schedule leaves on GitHub reaches the checkout on this Mac.
 - `schedule --no-pull` turns this off for a schedule (`--pull` turns it back on). It is on by default, also for schedules committed before it: their workflow files do not change.
 - `schedule` and `unschedule` bring the checkout up the same way right after their commit; the reply's `local` says how it went (`contains_commit` when they committed), and calling again completes an update left undone.
 - A scheduled worker is told that the job updates the checkout after it, so it does not try to pull from its worktree.
+- A `--worktree` run's worktree is removed once its commits are on GitHub — on the default branch, or the head of a pull request merged into it — even with something left uncommitted in it: that is first kept in git as two commits under `refs/claude/leftovers/<group>-<n>` (the index, and every changed, untracked and ignored file; not `.worktreeinclude` copies), and the summary says how to bring it back. Its branches go too when they point at those commits (`git fetch origin pull/<n>/head` brings them back). A worktree whose pull request is open stays, and the end of a later run of the repository's schedules looks at it again, so a pull request merged by hand the next day still gets its worktree removed. Groups made before this version, and groups you made with `batch`, are not touched.
 
 ### Changed
 

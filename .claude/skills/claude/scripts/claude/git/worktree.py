@@ -1,4 +1,4 @@
-"""Linked worktrees through the git CLI: listing them, what a checkout holds beyond its commit, removing one, and its branch."""
+"""Linked worktrees through the git CLI: listing them, what a checkout holds beyond its commit and keeping that in git, removing one, and its branch."""
 
 from __future__ import annotations
 

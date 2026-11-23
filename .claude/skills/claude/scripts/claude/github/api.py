@@ -1,4 +1,4 @@
-"""GitHub through the `gh` CLI: its login and token scopes, which repository a git remote names, a repository's facts, workflow files read, committed and deleted on the default branch through the Contents API (probe 11, 15), the whole workflow directory in one GraphQL call, a workflow's state, enabling and disabling it, and the repository's runners. Every path, field and error text of GitHub's lives here; callers get the skill's own terms and GitHubError."""
+"""GitHub through the `gh` CLI: its login and token scopes, which repository a git remote names, a repository's facts, workflow files read, committed and deleted on the default branch through the Contents API (probe 11, 15), the whole workflow directory in one GraphQL call, a workflow's state, enabling and disabling it, the repository's runners, and whether a commit is the head of a pull request merged into a branch. Every path, field and error text of GitHub's lives here; callers get the skill's own terms and GitHubError."""
 
 from __future__ import annotations
 
