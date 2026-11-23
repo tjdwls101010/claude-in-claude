@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 
 from claude.errors import Refusal
-from claude.git import branch_created, branch_tip, commits_beyond, current_branch, delete_branch, detached_commits, head_commit, last_changed, leftovers, preserve_leftovers, prune_worktree, unlock_and_remove
+from claude.git import branch_tip, commits_beyond, current_branch, delete_branch, detached_commits, head_commit, last_changed, leftovers, preserve_leftovers, prune_worktree, unlock_and_remove
 from claude.registry import find_run, group_view, is_live, iter_runs, live_runs, read_meta, reap, registry_args, release_group, session_lock
 from claude.util import invocation, pid_alive, process_command
 
@@ -91,7 +91,10 @@ def clean_member(runs_dir, m, wt, others, force, removed, kept, group=None, land
     evidence, head, checked_out, saved = None, None, None, None
     if path.exists() and untouched_since is not None:
         changed = last_changed(str(path))
-        if changed is None or changed > untouched_since:
+        if changed is None:
+            kept.append({**entry, "reason": "git cannot read all of it, so what it holds is not known"})
+            return
+        if changed > untouched_since:
             kept.append({**entry, "reason": "it changed after its run ended, so someone may be working in it"})
             return
     if path.exists():
@@ -143,13 +146,13 @@ def clean_member(runs_dir, m, wt, others, force, removed, kept, group=None, land
         # The directory was deleted by hand; git still records the worktree and would refuse to delete its branch.
         prune_worktree(wt["repo"], path)
     if evidence:
-        # Its commits are on GitHub: the member's own branch, and a branch the run made and left at that commit, lose nothing. A branch that was there before the run — a person's, or the default branch — stays.
-        started = (first or {}).get("created_at") or 0
+        # Its commits are on GitHub: the member's own branch, and a branch the member made and left at that commit, lose nothing. A branch that was there before the group started — a person's, or the default branch — stays, and so does any branch of a group recorded before that list was kept.
+        before = wt.get("branches_before")
         deleted = []
         for b in dict.fromkeys(x for x in (wt["branch"], checked_out) if x):
             if b == evidence.get("default"):
                 continue
-            made_by_run = b == wt["branch"] or ((branch_created(wt["repo"], b) or 0) >= int(started) > 0)
+            made_by_run = b == wt["branch"] or (before is not None and b not in before)
             if made_by_run and (branch_tip(wt["repo"], b) == head or commits_beyond(wt["repo"], b, wt["base"]) == 0):
                 if delete_branch(wt["repo"], b)[0]:
                     deleted.append(b)

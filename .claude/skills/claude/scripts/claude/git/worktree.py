@@ -161,18 +161,21 @@ def detached_commits(repo, path, branch):
 
 
 def last_changed(worktree):
-    """When anything in the worktree at `worktree` last changed, as far as can be seen without writing to it: its index, its HEAD's log (commits, switches) and every changed, untracked or ignored entry, in epoch seconds; None when git cannot read it."""
+    """When anything in the worktree at `worktree` last changed, as far as can be seen without writing to it: its index, the newest entry of its HEAD's reflog (commits, switches — the entry's own time, since `git gc` rewrites the log file without anything happening) and every changed, untracked or ignored entry, in epoch seconds; None when git cannot read it."""
     entries = status_entries(worktree)
     if entries is None:
         return None
     times = []
-    for name in ("index", "logs/HEAD"):
-        code, out, _ = run_git(worktree, "rev-parse", "--git-path", name)
-        p = out.strip()
-        if code == 0 and p:
-            p = p if os.path.isabs(p) else os.path.join(worktree, p)
-            if os.path.exists(p):
-                times.append(os.lstat(p).st_mtime)
+    code, out, _ = run_git(worktree, "rev-parse", "--git-path", "index")
+    p = out.strip()
+    if code == 0 and p:
+        p = p if os.path.isabs(p) else os.path.join(worktree, p)
+        if os.path.exists(p):
+            times.append(os.lstat(p).st_mtime)
+    code, out, _ = run_git(worktree, "reflog", "show", "-n1", "--date=unix", "--format=%gd", "HEAD")
+    stamp = out.strip().rsplit("@{", 1)[-1].rstrip("}") if code == 0 else ""
+    if stamp.isdigit():
+        times.append(int(stamp))
     for _, rel in entries:
         p = Path(worktree) / rel.rstrip("/")
         if p.exists() or p.is_symlink():
@@ -180,14 +183,10 @@ def last_changed(worktree):
     return max(times) if times else 0
 
 
-def branch_created(repo, branch):
-    """When local `branch` was created, from the oldest entry of its reflog, in epoch seconds; None when it has no reflog."""
-    code, out, _ = run_git(repo, "reflog", "show", "--date=unix", "--format=%gd", f"refs/heads/{branch}")
-    lines = [l for l in out.splitlines() if l.strip()] if code == 0 else []
-    if not lines:
-        return None
-    stamp = lines[-1].rsplit("@{", 1)[-1].rstrip("}")
-    return int(stamp) if stamp.isdigit() else None
+def local_branches(repo):
+    """The names of the repository's local branches."""
+    code, out, _ = run_git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+    return sorted(l for l in out.splitlines() if l.strip()) if code == 0 else []
 
 
 def branch_tip(repo, branch):
@@ -321,7 +320,7 @@ def _preserve(worktree, ref, main, artifacts):
     for rel in left["untracked"] + left["ignored"]:
         if (Path(worktree) / rel / ".git").exists():
             return {"kept_because": f"{rel} is a repository of its own"}
-    code, out, _ = run_git(worktree, "status", "--porcelain=v2", "--ignore-submodules=none")
+    code, out, _ = run_git(worktree, "status", "--porcelain=v2", "--ignore-submodules=none", env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
     if any(line.startswith(("1 ", "2 ")) and line.split(" ")[2].startswith("S") and line.split(" ")[2] != "S..." for line in out.splitlines()):
         return {"kept_because": "a submodule in it has changes"}
     total = sum(_size(Path(worktree) / rel) for rel in left["tracked"] + left["untracked"] + left["ignored"])

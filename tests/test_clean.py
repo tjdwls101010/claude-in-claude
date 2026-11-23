@@ -361,3 +361,14 @@ class Landed(Worktrees):
         (kept,) = reply["kept"]
         self.assertIn("changed after", kept["reason"])
         self.assertTrue(self.wt("pr-1").exists())
+
+    def test_a_dormant_branch_whose_reflog_gc_trimmed_stays(self):
+        # Claude review R2-2: its oldest reflog entry is the run's commit, not its creation.
+        git(self.project, "branch", "dormant")
+        git(self.project, "reflog", "expire", "--expire=now", "refs/heads/dormant")
+        head = self.worked()
+        git(self.wt("pr-1"), "switch", "-q", "dormant")
+        git(self.wt("pr-1"), "merge", "-q", "--ff-only", head)
+        reply, _ = self.clean_landed("pr", {"landed": True, "label": "#204", "default": "main"})
+        (removed,) = reply["removed"]
+        self.assertNotIn("dormant", removed["branches_deleted"])

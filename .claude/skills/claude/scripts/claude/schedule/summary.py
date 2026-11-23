@@ -518,7 +518,11 @@ def _continue(snapshot, context):
     if went:
         # The session ran in a worktree that is gone now: it comes back at the commit the work landed as, with what was left in it when there was anything.
         back = ((went.get("leftovers") or {}).get("commit") or went.get("head") or "")[:12]
-        lines += ["# its worktree was removed; bring it back first", f'git -C "{c["project"]}" worktree add "{cwd}" {back}']
+        lines += ["# its worktree was removed; bring it back first"]
+        if not went.get("leftovers") and went.get("pr"):
+            # Nothing here holds that commit any more once git collects it; GitHub's pull request does.
+            lines += [f'git -C "{c["project"]}" fetch origin pull/{went["pr"]}/head']
+        lines += [f'git -C "{c["project"]}" worktree add "{cwd}" {back}']
     code = "\n".join(lines + [
         "# ask the same session a follow-up (it remembers this run)",
         f'uv run "{c["cli"]}" resume {meta["run_id"]} "…" --project "{c["project"]}"',

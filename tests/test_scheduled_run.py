@@ -737,6 +737,15 @@ class Cleanup(Job):
         self.open_then_merged(touch)
         self.assertEqual(self.worktrees(), ["nightly-44006368956-1-1"])
 
+    def test_a_gc_in_between_does_not_make_it_look_worked_in(self):
+        # Claude review R2-1: gc rewrites every worktree's logs/HEAD; that is not someone working there.
+        def gc(wt):
+            time.sleep(1.1)
+            git(self.project, "reflog", "expire", "--all", "--expire=now")
+            git(self.project, "gc", "-q")
+        self.open_then_merged(gc)
+        self.assertEqual(self.worktrees(), [])
+
     def test_an_unmarked_scheduled_group_is_left_by_the_sweep(self):
         self.open_then_merged(lambda wt: self.manifest(lambda m: m.pop("finished_at")))
         self.assertEqual(self.worktrees(), ["nightly-44006368956-1-1"])

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from claude.claude_cli import worktree_location
 from claude.errors import Refusal
-from claude.git import branch_exists, head_commit, main_checkout, toplevel, uncommitted_count
+from claude.git import branch_exists, head_commit, local_branches, main_checkout, toplevel, uncommitted_count
 from claude.registry import record_member
 from claude.runs import create_run, resume, settings_for, start_reply
 
@@ -18,6 +18,8 @@ def plan_members(group, tasks, defaults, caller_cwd, use_worktrees):
     """Each member's settings, directory and worktree, decided before anything starts. A fresh member gets a worktree when --worktree is on, its profile can write, it names no cwd of its own, and the repository has a commit to start from."""
     repo = toplevel(caller_cwd)
     head = head_commit(repo) if repo else None
+    # The branches there before any member works, so `clean` can tell a branch a member made from a person's.
+    before = local_branches(repo) if repo and use_worktrees else []
     plans = []
     for i, task in enumerate(tasks, 1):
         flags = {k: task.get(k) or defaults.get(k) for k in ("profile", "model", "effort", "schema")}
@@ -28,7 +30,7 @@ def plan_members(group, tasks, defaults, caller_cwd, use_worktrees):
             if use_worktrees and plan["settings"]["profile"] in WRITERS and not task.get("cwd") and not defaults.get("cwd") and repo and head:
                 name = f"{group}-{i}"
                 where = worktree_location(repo, name)
-                plan["worktree"] = {"name": name, "path": where["path"], "branch": where["branch"], "base": head, "repo": repo, "main": main_checkout(repo) or repo}
+                plan["worktree"] = {"name": name, "path": where["path"], "branch": where["branch"], "base": head, "repo": repo, "main": main_checkout(repo) or repo, "branches_before": before}
         else:
             plan["flags"] = flags
         plans.append(plan)
