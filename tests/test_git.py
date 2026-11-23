@@ -478,6 +478,12 @@ class DefaultBranchSync(unittest.TestCase):
         self.assertEqual(self.head(), before)
         self.assertEqual(self.sync(guard=lambda: None)["status"], "updated")
 
+    def test_a_refused_path_is_named_as_it_is(self):
+        # Codex review R2-07: only git's indentation is taken off a listed path.
+        (self.local / " f ").write_text("mine\n")
+        self.land({" f ": "theirs\n"}, "theirs")
+        self.assertEqual(self.sync()["files"], [" f "])
+
     def test_the_suggested_command_keeps_the_safety_flags(self):
         (self.local / "a.txt").write_text("mine\n")
         self.land({"a.txt": "theirs\n"}, "theirs")

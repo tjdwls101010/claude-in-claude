@@ -90,7 +90,8 @@ def _count(top, spec, env):
 
 def _commits(top, old, new, env):
     """([{sha7, subject}] from `old` to `new`, newest first, at most COMMITS_SHOWN; how many more there are)."""
-    out = _out(top, env, "log", "--encoding=UTF-8", f"--max-count={COMMITS_SHOWN}", "--format=%h%x00%s", f"{old}..{new}") or ""
+    code, out, _ = run_git(top, "log", "--encoding=UTF-8", f"--max-count={COMMITS_SHOWN}", "--format=%h%x00%s", f"{old}..{new}", env=env, errors="replace")
+    out = out if code == 0 else ""
     shown = []
     for line in out.splitlines():
         sha, _, subject = line.partition("\0")
@@ -108,7 +109,7 @@ def _overwritten(err):
                 for following in lines[i + 1:]:
                     if not following.startswith(("\t", "    ")):
                         break
-                    files.append(nfc(following.strip()))
+                    files.append(nfc(following[1:] if following.startswith("\t") else following[4:]))
                 return kind, files
     return None
 

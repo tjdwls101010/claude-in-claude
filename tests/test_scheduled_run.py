@@ -512,7 +512,9 @@ class LocalCheckout(Job):
         before = self.head()
         run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, worktree=True)
         self.assertEqual(self.head(), before)
-        self.assertIn(busy["run_id"], summary.split("[!WARNING]", 1)[1])
+        warning = summary.split("[!WARNING]", 1)[1]
+        self.assertIn(busy["run_id"], warning)
+        self.assertNotIn("pull", warning.split("To do it yourself", 1)[1].split("\n", 1)[0], "a plain pull would overwrite ignored files (codex review R2-05)")
         self.cli("stop", "--run", busy["run_id"])
 
     def test_a_job_without_a_worker_leaves_it(self):
@@ -540,6 +542,27 @@ class LocalCheckout(Job):
         finish = self.step("finish", env)
         self.assertEqual(finish.returncode, 1)
         self.assertEqual(self.head(), before)
+
+    def test_a_run_in_the_checkout_by_another_spelling_holds_it(self):
+        # Codex review R2-01: this Mac's file system ignores letter case, so `…/PROJECT` is the checkout too.
+        alias = self.project.parent / self.project.name.upper()
+        if not alias.exists():
+            self.skipTest("the file system tells letter case apart")
+        busy = self.cli_json("start", "x [[fake:sleep:60]]", "--profile", "write", "--cwd", str(alias))
+        before = self.head()
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, worktree=True)
+        self.assertEqual(self.head(), before)
+        self.assertIn(busy["run_id"], summary.split("[!WARNING]", 1)[1])
+        self.cli("stop", "--run", busy["run_id"])
+
+    def test_a_run_in_a_worktree_of_its_own_below_the_checkout_does_not_hold_it(self):
+        # Codex review R2-02: git places that run in another checkout, whatever its path looks like.
+        wt = self.project / ".claude" / "worktrees" / "mine"
+        git(self.project, "worktree", "add", "-q", "-b", "mine", str(wt))
+        busy = self.cli_json("start", "x [[fake:sleep:60]]", "--profile", "write", "--cwd", str(wt))
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, worktree=True)
+        self.assertEqual(self.head(), sha, summary)
+        self.cli("stop", "--run", busy["run_id"])
 
     def test_a_run_whose_finish_has_not_read_its_changes_holds_the_update(self):
         # Codex review LS07: another job's end between this run's end and its Finish must not slip GitHub's commits into this run's changes.

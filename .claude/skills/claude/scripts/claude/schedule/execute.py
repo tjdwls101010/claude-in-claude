@@ -7,6 +7,7 @@ Finish's stages are independent (K20): each failure is collected into the summar
 
 from __future__ import annotations
 
+import contextlib
 import os
 import secrets
 import shlex
@@ -24,9 +25,9 @@ from claude.git import commits_beyond, committed_files, head_commit, numstat, st
 from claude.github import JOB_HANDLES, GitHubError, annotation, job_context, legacy_workflow_file, resume_commands, set_workflow_enabled, stop_commands, write_output, write_summary
 from claude.launchd import remove_agent
 from claude.observe import snapshot, wait_ended
-from claude.registry import claim_slot, claude_alive, find_by_origin_job, group_view, is_live, list_groups, read_definition, read_job, reap, record_job, resolve_runs_dir, schedule_dir, schedule_lock, update_job
+from claude.registry import claim_slot, claude_alive, find_by_origin_job, group_view, is_live, list_groups, read_definition, read_job, reap, record_job, resolve_runs_dir, schedule_dir, schedule_lock, sync_lock, update_job, update_meta
 from claude.runs import start, stop
-from claude.util import entry_path, invocation
+from claude.util import entry_path, invocation, now
 
 from .local import left_alone, sync_local
 from .spec import dispatcher_holder, dispatcher_label, holder_words, worktree_group
@@ -213,8 +214,13 @@ def scheduled_run(spec, env, write):
     if retry_of:
         origin["retry_of"] = retry_of["job"]
     _scrub_worker_env()
+    in_place = not spec.get("worktree")
     try:
-        run_id, refused = _start_worker(spec, prompt, schema_path, registry, group, origin)
+        # K27, K30: from the snapshot the run's changes are measured against until its worker is live — and so holds the checkout's updates off — nothing may update the checkout, or that would count as the run's change.
+        with sync_lock(registry) if in_place else contextlib.nullcontext():
+            if in_place:
+                update_job(registry, name, job, {"tree_before": status_snapshot(project)})
+            run_id, refused = _start_worker(spec, prompt, schema_path, registry, group, origin)
     except Refusal as e:
         run_id, refused = None, e.message
     if refused:
@@ -456,8 +462,8 @@ def scheduled_finish(spec, env, write):
     warnings, unconfirmed, stopped_by_finish = [], None, False
     try:
         meta = reap(run_dir)
-    except Refusal as e:
-        meta, unconfirmed = None, f"its meta.json cannot be read ({e.message}), so whether the worker still runs is unknown"
+    except (Refusal, OSError) as e:
+        meta, unconfirmed = None, f"its meta.json cannot be read ({getattr(e, 'message', None) or e}), so whether the worker still runs is unknown"
     if meta is not None and is_live(meta):
         # The Run step was cancelled or timed out with the worker alive; the runner would kill it as the job ends and leave the run orphaned (probe 5).
         stopped_by_finish = True
@@ -467,8 +473,8 @@ def scheduled_finish(spec, env, write):
             warnings.append(f"Stopping the worker failed: {e.message}")
         try:
             meta = reap(run_dir)
-        except Refusal as e:
-            meta, unconfirmed = None, f"its meta.json cannot be read after stop ({e.message}), so whether the worker still runs is unknown"
+        except (Refusal, OSError) as e:
+            meta, unconfirmed = None, f"its meta.json cannot be read after stop ({getattr(e, 'message', None) or e}), so whether the worker still runs is unknown"
         if meta is not None and (is_live(meta) or claude_alive(meta)):
             unconfirmed = f"run {run_id} is still {meta.get('state')} after stop"
     snap = None
@@ -483,6 +489,10 @@ def scheduled_finish(spec, env, write):
             changes = _changes(spec, rec, meta, (snap or {}).get("header", {}).get("files_edited") or [])
         except OSError as e:
             warnings.append(f"What changed could not be read: {e}")
+    if changes is not None:
+        # From here what comes into the checkout is not this run's; another job's update need not wait for this one (K30).
+        with contextlib.suppress(Refusal, OSError):
+            update_meta(run_dir, lambda m: m.__setitem__("changes_read_at", now()))
     # After the changes are read, so what comes in from GitHub is not counted as the run's (K27).
     local = _bring_local(spec, ctx, registry, run_id, unconfirmed)
     if changes is not None:
