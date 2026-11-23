@@ -9,17 +9,17 @@ from claude.util import nfc
 
 
 def run_git(cwd, *args, timeout=30, env=None):
-    """(returncode, stdout, stderr) of `git -C cwd args…`, in `env` when given (this process's environment otherwise); a missing git or directory is a failure, not an exception."""
+    """(returncode, stdout, stderr) of `git -C cwd args…`, in `env` when given (this process's environment otherwise); a missing git or directory is a failure, not an exception. Output is read as UTF-8, a byte that is not becoming U+FFFD: a commit message in another encoding, or a repository's own encoding setting, must not stop the caller."""
     try:
-        proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=timeout, env=env)
+        proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         return 1, "", str(e)
     return proc.returncode, proc.stdout, proc.stderr
 
 
-def toplevel(path):
+def toplevel(path, env=None):
     """The top level of the checkout `path` is in, or None outside a git work tree."""
-    code, out, _ = run_git(path, "rev-parse", "--show-toplevel")
+    code, out, _ = run_git(path, "rev-parse", "--show-toplevel", env=env)
     return nfc(out.strip()) if code == 0 and out.strip() else None
 
 
@@ -63,7 +63,8 @@ def current_branch(path):
     return out.strip() if code == 0 and out.strip() else None
 
 
-def remote_url(path, name="origin"):
-    """The URL of the remote `name` of the repository at `path` as configured, or None. Not `remote get-url`, which applies `url.*.insteadOf`: a rewrite changes where git connects, not which repository the remote names."""
-    code, out, _ = run_git(path, "config", "--get", f"remote.{name}.url")
-    return out.strip() if code == 0 and out.strip() else None
+def remote_url(path, name="origin", env=None):
+    """The URL of the remote `name` of the repository at `path` as configured, or None. Not `remote get-url`, which applies `url.*.insteadOf`: a rewrite changes where git connects, not which repository the remote names. Of several URLs, the first, which is the one fetch uses (`config --get` alone gives the last)."""
+    code, out, _ = run_git(path, "config", "--get-all", f"remote.{name}.url", env=env)
+    first = out.strip().splitlines()[0].strip() if code == 0 and out.strip() else ""
+    return first or None

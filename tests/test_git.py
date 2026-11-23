@@ -71,6 +71,9 @@ class Repo(unittest.TestCase):
         # A rewrite changes where git connects, not which repository the remote names.
         git(self.repo, "config", "url./elsewhere/mirror.git.insteadOf", "https://github.com/someone/project.git")
         self.assertEqual(g.remote_url(str(self.repo)), "https://github.com/someone/project.git")
+        # With several URLs, fetch uses the first; `config --get` alone would read the last (codex review LS03).
+        git(self.repo, "config", "--add", "remote.origin.url", "https://github.com/someone/else.git")
+        self.assertEqual(g.remote_url(str(self.repo)), "https://github.com/someone/project.git")
 
     def test_paths_are_nfc(self):
         decomposed = self.root / "café"
@@ -288,7 +291,7 @@ class DefaultBranchSync(unittest.TestCase):
         r = self.sync()
         self.assertEqual((r["status"], r["files"]), ("not_updated", ["a.txt"]))
         self.assertIn("1 file", r["reason"])
-        self.assertIn("merge --ff-only origin/main", r["instead"])
+        self.assertIn("merge --ff-only --no-overwrite-ignore origin/main", r["instead"])
         self.assertEqual(self.head(), before)
         self.assertEqual((self.local / "a.txt").read_text(), "mine\n")
 
@@ -408,3 +411,74 @@ class DefaultBranchSync(unittest.TestCase):
         plain = self.root / "plain"
         plain.mkdir()
         self.assertEqual(self.sync(plain)["status"], "failed")
+
+    # What the person's own git settings must not turn into (codex review LS01, LS02, LS06, LS08), each reproduced against plain git first.
+
+    def test_an_autostash_setting_does_not_carry_a_change_into_a_conflict(self):
+        git(self.local, "config", "merge.autostash", "true")
+        before = self.head()
+        (self.local / "a.txt").write_text("mine\n")
+        self.land({"a.txt": "theirs\n"}, "theirs")
+        r = self.sync()
+        self.assertEqual((r["status"], r["files"]), ("not_updated", ["a.txt"]))
+        self.assertEqual(self.head(), before)
+        self.assertEqual((self.local / "a.txt").read_text(), "mine\n")
+        self.assertEqual(git(self.local, "status", "--porcelain"), "M a.txt")
+
+    def test_a_squash_merge_option_does_not_stop_the_branch_moving(self):
+        git(self.local, "config", "branch.main.mergeOptions", "--squash")
+        sha = self.land({"b.txt": "b2\n"}, "theirs")
+        self.assertEqual(self.sync()["status"], "updated")
+        self.assertEqual(self.head(), sha)
+        self.assertEqual(git(self.local, "status", "--porcelain"), "")
+
+    def test_a_configured_refmap_moves_no_other_branch(self):
+        git(self.local, "switch", "-q", "-c", "side")
+        (self.local / "a.txt").write_text("side\n")
+        git(self.local, "commit", "-q", "-am", "side only")
+        side = self.head()
+        git(self.local, "switch", "-q", "main")
+        git(self.local, "config", "--add", "remote.origin.fetch", "+refs/heads/main:refs/heads/side")
+        sha = self.land({"b.txt": "b2\n"}, "theirs")
+        self.assertEqual(self.sync()["status"], "updated")
+        self.assertEqual(self.head(), sha)
+        self.assertEqual(self.head("refs/heads/side"), side)
+
+    def test_fetch_head_is_left_alone(self):
+        git(self.local, "fetch", "-q", "origin")
+        fetch_head = (self.local / ".git" / "FETCH_HEAD").read_text()
+        self.land({"b.txt": "b2\n"}, "theirs")
+        self.sync()
+        self.assertEqual((self.local / ".git" / "FETCH_HEAD").read_text(), fetch_head)
+
+    def test_a_directory_the_commits_replace_is_named(self):
+        (self.local / ".gitignore").write_text("secret\ncache/\n")
+        git(self.local, "commit", "-q", "-am", "ignore cache")
+        git(self.local, "push", "-q", "origin", "main")
+        (self.local / "cache").mkdir()
+        (self.local / "cache" / "x").write_text("mine\n")
+        self.land({"cache": "a file now\n", ".gitignore": "secret\n"}, "cache is a file")
+        r = self.sync()
+        self.assertEqual((r["status"], r["files"]), ("not_updated", ["cache"]))
+        self.assertEqual((self.local / "cache" / "x").read_text(), "mine\n")
+
+    def test_a_log_encoding_setting_does_not_break_the_report(self):
+        git(self.local, "config", "i18n.logOutputEncoding", "ISO-8859-1")
+        sha = self.land({"b.txt": "b2\n"}, "café")
+        r = self.sync()
+        self.assertEqual(r["status"], "updated")
+        self.assertEqual(self.head(), sha)
+        self.assertEqual(r["commits"][0]["subject"], "café")
+
+    def test_a_guard_is_asked_right_before_the_change(self):
+        before = self.head()
+        sha = self.land({"b.txt": "b2\n"}, "theirs")
+        r = self.sync(guard=lambda: "run r1 is working in this checkout")
+        self.assertEqual((r["status"], r["reason"], r["to"]), ("not_updated", "run r1 is working in this checkout", sha))
+        self.assertEqual(self.head(), before)
+        self.assertEqual(self.sync(guard=lambda: None)["status"], "updated")
+
+    def test_the_suggested_command_keeps_the_safety_flags(self):
+        (self.local / "a.txt").write_text("mine\n")
+        self.land({"a.txt": "theirs\n"}, "theirs")
+        self.assertIn("merge --ff-only --no-overwrite-ignore origin/main", self.sync()["instead"])
