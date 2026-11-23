@@ -8,6 +8,7 @@ world.json: {"auth": "ok" | "none" | "noscope", "repos": {"owner/name": {"privat
   protected: a Contents PUT or DELETE gets the 409 a protected branch answered (captured).
   offline: a Contents PUT fails as gh does without a network: a message on stderr, no HTTP status.
   slow: every call first sleeps this many seconds.
+  A repository may carry "pulls": [{"number", "head" (a commit sha), "base" (default: the default branch), "base_repo", "state" (open or closed), "merged"}] — what `commits/<sha>/pulls` answers, each in the shape of the captured `commit-pulls-merged` — and "unknown_commits": shas GitHub answers 422 "No commit found" for (captured).
   A repository may carry "git": the path of a bare git repository standing in for GitHub's copy. A Contents PUT or DELETE then also commits the change there, with the request's message, and answers with that commit's sha, so a checkout whose origin is that repository can fetch what the API committed.
 
 An API path is read as gh reads it (Go's net/url; each case captured on a private repository): a `#` starts a fragment that is dropped, the first `?` the query, and every path component and query value is percent-decoded once — so a raw `a#b.yml` names `a` — while an escape that is not two hex digits fails before any request. A Contents GET whose `ref` is not the default branch gets the 404 a missing ref got.
@@ -279,6 +280,26 @@ if c:
         repo.get("workflows", {}).pop(name, None)
         save()
         answer("contents-delete", **{"commit.sha": commit_sha(repo, fpath, None, body.get("message")), "commit.message": body.get("message")})
+
+pc = re.match(r"^commits/([0-9a-f]{7,40})/pulls$", rest)
+if pc:
+    sha = pc.group(1)
+    if sha in repo.get("unknown_commits", []):
+        error("commit-pulls-unknown-commit", f"No commit found for SHA: {sha}")
+    # Each pull request is the captured one with the world's fields put in.
+    template = json.loads(fixture("commit-pulls-merged")["stdout"])[0]
+    found = []
+    for pr in repo.get("pulls", []):
+        if pr["head"] != sha:
+            continue
+        item = json.loads(json.dumps(template))
+        item.update({"number": pr["number"], "state": pr.get("state", "closed"), "merged_at": "2026-11-23T11:18:44Z" if pr.get("merged") else None, "html_url": f"https://github.com/{repo_name}/pull/{pr['number']}"})
+        item["head"]["sha"] = sha
+        item["base"]["ref"] = pr.get("base", repo.get("default_branch", "main"))
+        item["base"]["repo"]["full_name"] = pr.get("base_repo", repo_name)
+        found.append(item)
+    sys.stdout.write(json.dumps(found))
+    sys.exit(0)
 
 w = re.match(r"^actions/workflows/([^/]+)(?:/(enable|disable))?$", rest)
 if w:

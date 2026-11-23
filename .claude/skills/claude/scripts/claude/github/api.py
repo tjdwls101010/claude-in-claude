@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import shutil
 import subprocess
 from urllib.parse import quote
+
+from .job import scrub_job_env
 
 WORKFLOWS = ".github/workflows"
 REMOTE = re.compile(r"^(?:https://(?:[^@/]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+)/([^/]+?)(?:\.git)?/?$")
@@ -47,11 +50,11 @@ def _gh(*args, stdin=None, env=None):
     return proc
 
 
-def _api(path, method="GET", body=None, empty_ok=False):
+def _api(path, method="GET", body=None, empty_ok=False, env=None):
     args = ["api", "-X", method, path]
     if body is not None:
         args += ["--input", "-"]
-    proc = _gh(*args, stdin=json.dumps(body) if body is not None else None)
+    proc = _gh(*args, stdin=json.dumps(body) if body is not None else None, env=env)
     if proc.returncode != 0:
         status = None
         message = (proc.stderr or proc.stdout).strip()
@@ -198,3 +201,26 @@ def runners(repo):
     """The repository's self-hosted runners: `[{name, status, busy, labels}]` (`status` is `online` or `offline`)."""
     data = _api(f"repos/{repo}/actions/runners")
     return [{"name": r.get("name"), "status": r.get("status"), "busy": bool(r.get("busy")), "labels": [l.get("name") for l in r.get("labels") or []]} for r in data.get("runners") or []]
+
+
+def pull_evidence(repo, sha, branch):
+    """What GitHub says of commit `sha` in `repo` (the person's login, not a job's token, which may not read pull requests): `{kind: merged, number, url}` when a pull request whose head is exactly that commit was merged into `branch` of `repo` — a squash or rebase merge leaves other commits on the branch, so git alone cannot tell; `open` (same, not yet merged); `other` when its pull requests go elsewhere or were closed unmerged; `none` when no pull request has it as its head or GitHub does not have the commit; `unknown` (with `error`) when GitHub could not be asked."""
+    try:
+        # 성진: one page of 100; a commit at the head of more pull requests than that is not looked past.
+        pulls = _api(f"repos/{repo}/commits/{sha}/pulls?per_page=100", env=scrub_job_env(os.environ))
+    except GitHubError as e:
+        if e.status == 422 and "No commit found" in e.message:
+            return {"kind": "none"}
+        return {"kind": "unknown", "error": e.message}
+    found = {}
+    for pr in pulls if isinstance(pulls, list) else []:
+        if (pr.get("head") or {}).get("sha") != sha:
+            continue
+        base = pr.get("base") or {}
+        here = base.get("ref") == branch and ((base.get("repo") or {}).get("full_name") or "").lower() == repo.lower()
+        kind = "merged" if here and pr.get("merged_at") else "open" if here and pr.get("state") == "open" else "other"
+        found.setdefault(kind, {"kind": kind, "number": pr.get("number"), "url": pr.get("html_url")})
+    for kind in ("merged", "open"):
+        if kind in found:
+            return found[kind]
+    return {"kind": "other"} if found else {"kind": "none"}
