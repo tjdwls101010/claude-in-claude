@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import tempfile
 from pathlib import Path
 
 from claude.util import nfc
@@ -216,3 +217,69 @@ def committed_files(path, base, head):
     code, out, _ = run_git(path, "diff", "--numstat", "-z", "--no-renames", base, head)
     counts = _numstat_lines(out) if code == 0 else {}
     return [{"status": st, "path": rel, "lines": counts.get(rel)} for st, rel in sorted(changed, key=lambda x: x[1])]
+
+
+# Ignored files are copied into git objects whole; beyond this the worktree stays where it is.
+LEFTOVER_IGNORED_BYTES = 100 * 1024 * 1024
+# Local refs only: nothing pushes refs/claude/*, and the commits carry no one's name.
+LEFTOVER_IDENTITY = {"GIT_AUTHOR_NAME": "claude skill", "GIT_AUTHOR_EMAIL": "claude-skill@localhost", "GIT_COMMITTER_NAME": "claude skill", "GIT_COMMITTER_EMAIL": "claude-skill@localhost"}
+
+
+def _size(path):
+    p = Path(path)
+    if p.is_symlink() or not p.is_dir():
+        return p.lstat().st_size if p.exists() or p.is_symlink() else 0
+    return sum(f.lstat().st_size for f in p.rglob("*") if not f.is_dir() or f.is_symlink())
+
+
+def preserve_leftovers(worktree, ref, main, artifacts):
+    """Keep what the worktree at `worktree` holds beyond its commit — as `leftovers` counts it, so neither `.worktreeinclude` copies (which can be secrets) nor unchanged startup artifacts — as two commits under `ref` in its repository, so the worktree can be removed without losing it: `index_commit` (the index, its parent HEAD) and `commit` (every changed, untracked and ignored file as it is on disk, its parent `index_commit`); `git worktree add <path> <commit>` brings the files back. Returns `{ref, commit, index_commit, counts: {tracked, untracked, ignored}, bytes}`, with `commit` None when there is nothing to keep, or `{kept_because}` when it cannot be kept whole: an unresolved conflict, a repository of its own inside, a submodule with changes, ignored files over LEFTOVER_IGNORED_BYTES, or a step git refused. Nothing is changed in the worktree."""
+    left = leftovers(worktree, main, artifacts)
+    if left is None:
+        return {"kept_because": "git does not see a work tree there"}
+    counts = {k: len(v) for k, v in left.items()}
+    if not any(counts.values()):
+        return {"ref": ref, "commit": None, "index_commit": None, "counts": counts, "bytes": 0}
+    code, out, _ = run_git(worktree, "ls-files", "--unmerged")
+    if code != 0 or out.strip():
+        return {"kept_because": "its index has unresolved conflicts"}
+    for rel in left["untracked"] + left["ignored"]:
+        if (Path(worktree) / rel / ".git").exists():
+            return {"kept_because": f"{rel} is a repository of its own"}
+    code, out, _ = run_git(worktree, "status", "--porcelain=v2", "--ignore-submodules=none")
+    if any(line.startswith(("1 ", "2 ")) and line.split(" ")[2].startswith("S") and line.split(" ")[2] != "S..." for line in out.splitlines()):
+        return {"kept_because": "a submodule in it has changes"}
+    ignored_bytes = sum(_size(Path(worktree) / rel) for rel in left["ignored"])
+    if ignored_bytes > LEFTOVER_IGNORED_BYTES:
+        return {"kept_because": f"its ignored files come to {ignored_bytes // (1024 * 1024)} MiB, over the 100 MiB kept in git"}
+    env = {**os.environ, **LEFTOVER_IDENTITY}
+    message = f"Left in {worktree} when its work had landed"
+
+    def git_out(*args, index=None):
+        code, out, err = run_git(worktree, *args, env={**env, "GIT_INDEX_FILE": index} if index else env)
+        if code != 0:
+            raise RuntimeError(err.strip().splitlines()[-1] if err.strip() else f"git {args[0]} failed")
+        return out.strip()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        index = os.path.join(tmp, "index")
+        try:
+            head = git_out("rev-parse", "HEAD")
+            index_tree = git_out("write-tree")
+            index_commit = git_out("commit-tree", index_tree, "-p", head, "-m", f"{message}: the index")
+            git_out("read-tree", index_tree, index=index)
+            git_out("add", "--all", "--force", "--", ".", index=index)
+            # What `leftovers` leaves out stays out of git too: the include copies and startup artifacts that `add --force` just took.
+            dropped = [rel for xy, rel in (status_entries(worktree) or []) if xy in ("??", "!!") and rel.rstrip("/") not in set(left["untracked"] + left["ignored"])]
+            if dropped:
+                git_out("rm", "--cached", "-r", "-q", "--ignore-unmatch", "--", *[d.rstrip("/") for d in dropped], index=index)
+            tree = git_out("write-tree", index=index)
+            commit = git_out("commit-tree", tree, "-p", index_commit, "-m", f"{message}: every file")
+            kept = set(git_out("ls-tree", "-r", "-z", "--name-only", commit).split("\0"))
+            missing = [rel for rel in left["tracked"] + left["untracked"] + left["ignored"] if rel not in kept and Path(worktree, rel).exists()]
+            if missing:
+                return {"kept_because": f"{len(missing)} file(s) did not make it into git, such as {missing[0]}"}
+            git_out("update-ref", ref, commit)
+        except RuntimeError as e:
+            return {"kept_because": f"git refused to keep them: {e}"}
+    return {"ref": ref, "commit": commit, "index_commit": index_commit, "counts": counts, "bytes": ignored_bytes}

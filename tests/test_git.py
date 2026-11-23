@@ -139,6 +139,74 @@ class Worktree(unittest.TestCase):
 
 
 
+class Leftovers(unittest.TestCase):
+    """`preserve_leftovers`: what a worktree holds beyond its commit, kept in git so the worktree can go. Each case is checked by bringing it back with plain git, not by reading the module's own record."""
+
+    REF = "refs/claude/leftovers/g-1"
+
+    def setUp(self):
+        Worktree.setUp(self)
+        # What the worktree held when its member started; anything a test makes after this is the member's.
+        self.snap = g.startup_snapshot(str(self.wt), str(self.repo))
+
+    def preserve(self):
+        return g.preserve_leftovers(str(self.wt), self.REF, str(self.repo), self.snap)
+
+    def test_everything_left_comes_back(self):
+        snap = self.snap
+        (self.wt / "a.txt").write_text("staged\n")
+        git(self.wt, "add", "a.txt")
+        (self.wt / "a.txt").write_text("worked\n")
+        (self.wt / "new").mkdir()
+        (self.wt / "new" / "f.txt").write_text("f\n")
+        (self.wt / "한글 노트.md").write_text("ㄱ\n")
+        os.symlink("a.txt", self.wt / "link")
+        (self.wt / "build").mkdir()
+        (self.wt / "build" / "o").write_text("o\n")
+        saved = g.preserve_leftovers(str(self.wt), self.REF, str(self.repo), snap)
+        self.assertEqual(saved["counts"], {"tracked": 1, "untracked": 3, "ignored": 1})
+        self.assertEqual(git(self.repo, "rev-parse", self.REF), saved["commit"])
+        self.assertEqual(git(self.repo, "show", f"{saved['index_commit']}:a.txt"), "staged", "what was staged is the index commit")
+        back = self.root / "back"
+        git(self.repo, "worktree", "add", "-q", "--detach", str(back), saved["commit"])
+        self.assertEqual((back / "a.txt").read_text(), "worked\n")
+        self.assertEqual((back / "new" / "f.txt").read_text(), "f\n")
+        self.assertEqual((back / "한글 노트.md").read_text(), "ㄱ\n")
+        self.assertEqual(os.readlink(back / "link"), "a.txt")
+        self.assertEqual((back / "build" / "o").read_text(), "o\n")
+        self.assertFalse((back / ".env").exists(), "a .worktreeinclude copy (here a secret) is not stored")
+        self.assertFalse((back / ".claude" / "histories").exists(), "a startup artifact unchanged since is not stored")
+
+    def test_nothing_left_is_nothing_stored(self):
+        saved = self.preserve()
+        self.assertIsNone(saved["commit"])
+        self.assertEqual(git(self.repo, "for-each-ref", self.REF), "")
+
+    def test_a_repository_of_its_own_inside_is_not_taken_apart(self):
+        make_repo(self.wt / "inner")
+        saved = self.preserve()
+        self.assertIn("repository of its own", saved["kept_because"])
+        self.assertEqual(git(self.repo, "for-each-ref", self.REF), "")
+
+    def test_too_much_ignored_is_left_where_it_is(self):
+        (self.wt / "build").mkdir()
+        with open(self.wt / "build" / "big", "wb") as f:
+            f.truncate(101 * 1024 * 1024)
+        saved = self.preserve()
+        self.assertIn("100 MiB", saved["kept_because"])
+
+    def test_an_unresolved_conflict_is_left_where_it_is(self):
+        git(self.wt, "switch", "-q", "-c", "x")
+        (self.wt / "a.txt").write_text("x\n")
+        git(self.wt, "commit", "-q", "-am", "x")
+        git(self.wt, "switch", "-q", "worktree-g-1")
+        (self.wt / "a.txt").write_text("y\n")
+        git(self.wt, "commit", "-q", "-am", "y")
+        git(self.wt, "merge", "-q", "x", check=False)
+        saved = self.preserve()
+        self.assertIn("conflict", saved["kept_because"])
+
+
 class TreeSnapshot(unittest.TestCase):
     """What a scheduled run compares before and after the worker (K27): the branch, the commit and every changed or untracked path with its content fingerprint, and line counts against HEAD."""
 
