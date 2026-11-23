@@ -132,6 +132,7 @@ SCHEDULE_EPILOG = f"""\
 Time: --cron and --at are in this Mac's time zone, which launchd fires in and which the workflow's `timezone:` names; never convert them to UTC. --cron takes five numeric fields (minute hour day-of-month month day-of-week; `*`, `,`, `-`, `/`, no names like MON), fires at most every 5 minutes, and with both day fields restricted fires on either, as cron does. --at YYYY-MM-DDTHH:MM runs once; the run then disables its workflow and removes its dispatcher.
 The Mac must be awake: a time missed in sleep runs once on wake. A job waits up to 24 hours for this repository's runner to be online and free, then fails; one runner runs one job at a time, so a long worker holds back the repository's other jobs.
 Defaults: --model {SCHEDULE_DEFAULTS['model']}, --effort {SCHEDULE_DEFAULTS['effort']}, --timeout {SCHEDULE_DEFAULTS['timeout']}, --runs-on self-hosted; the job's own limit is --timeout plus 10 minutes.
+Your checkout: when a run ends — completed, failed, timed out or cancelled — the job brings the default branch of the project checkout up to GitHub's, so what the worker merged there is on this Mac too. It fast-forwards the files when that branch is checked out, and otherwise moves only the branch. It never goes over anything of yours: a file you changed, an untracked or ignored file the update would replace, a commit only here, a merge or rebase in progress, a run working in the checkout itself, or an origin that is another repository leaves the checkout as it is, and the run's summary says why and what to run; the next run's end tries again. Hooks do not run, and git uses your own login, not the job's token. --no-pull leaves the checkout alone.
 The runs, their pause, re-run, cancel and logs are GitHub's: `gh workflow disable|enable`, `gh run list|view|rerun|cancel`, or the repository's Actions page."""
 
 UNSCHEDULE_DESC = """\
@@ -283,6 +284,9 @@ def build_parser():
     wt = p.add_mutually_exclusive_group()
     wt.add_argument("--worktree", dest="worktree", action="store_const", const=True, help="run each time in a fresh git worktree of the local HEAD instead of the checkout (write and auto only); a worktree with changes is kept for you to take them, one without is removed")
     wt.add_argument("--no-worktree", dest="worktree", action="store_const", const=False, help="run in the project checkout as it is when the job starts (the default)")
+    pl = p.add_mutually_exclusive_group()
+    pl.add_argument("--pull", dest="pull", action="store_const", const=True, help="when each run ends, whatever its outcome, fast-forward the project checkout's default branch to what GitHub holds, so what the worker merged there is here too (the default; see below)")
+    pl.add_argument("--no-pull", dest="pull", action="store_const", const=False, help="leave the checkout as it is when a run ends: for a checkout someone works in on its default branch")
     p.add_argument("--runs-on", metavar="LABEL", action="append", help="a label the runner must have besides self-hosted; repeat for several")
     p.add_argument("--message", metavar="TEXT", help="the commit message (default: `Schedule Claude worker NAME: WHEN`)")
     p.add_argument("--public-ok", action="store_true", help="allow a public repository, whose Actions logs and summaries anyone can read and whose self-hosted runner runs code from anyone's pull request on this Mac")
@@ -315,6 +319,7 @@ def build_parser():
     when.add_argument("--at")
     p.add_argument("--timezone", required=True)
     p.add_argument("--worktree", action="store_true")
+    p.add_argument("--no-pull", action="store_true")
     p.add_argument("--workflow")
     p.add_argument("--definition")
     return root
@@ -440,7 +445,7 @@ def dispatch(args):
             return 0
         if not args.name:
             raise Refusal("--name is required", arguments=True, help="schedule --help")
-        flags = {"prompt": schedule_prompt(args), "schema": schedule_schema(args.schema), "cron": args.cron, "at": args.at, "profile": args.profile, "model": args.model, "effort": args.effort, "timeout": args.timeout, "worktree": args.worktree, "runs_on": args.runs_on}
+        flags = {"prompt": schedule_prompt(args), "schema": schedule_schema(args.schema), "cron": args.cron, "at": args.at, "profile": args.profile, "model": args.model, "effort": args.effort, "timeout": args.timeout, "worktree": args.worktree, "pull": args.pull, "runs_on": args.runs_on}
         emit(schedule(name=args.name, flags=flags, cwd=base_dir(args), dry_run=args.dry_run, public_ok=args.public_ok, message=args.message))
         return 0
     if c == "unschedule":
@@ -453,7 +458,7 @@ def dispatch(args):
     if c == "__supervise":
         return supervise(args.run_dir)
     if c == "__scheduled":
-        spec = {"name": args.name, "project": args.project, "settings": {"profile": args.profile, "model": args.model, "effort": args.effort, "timeout": args.timeout}, "cron": args.cron, "at": args.at, "timezone": args.timezone, "worktree": args.worktree, "workflow": args.workflow, "definition": args.definition}
+        spec = {"name": args.name, "project": args.project, "settings": {"profile": args.profile, "model": args.model, "effort": args.effort, "timeout": args.timeout}, "cron": args.cron, "at": args.at, "timezone": args.timezone, "worktree": args.worktree, "pull": not args.no_pull, "workflow": args.workflow, "definition": args.definition}
         step = scheduled_run if args.step == "run" else scheduled_finish
         code = step(spec, dict(os.environ), lambda text: (sys.stdout.write(text), sys.stdout.flush()))
         return code

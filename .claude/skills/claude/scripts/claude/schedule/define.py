@@ -178,7 +178,7 @@ def schedule(*, name, flags, cwd, dry_run=False, public_ok=False, message=None):
 
     def derived(file, spec):
         """Everything that follows from the file and spec finally committed: the dispatcher's calendar and command, the runner check, the reply's settings."""
-        return calendar_entries(fields_of(spec)), dispatcher_argv(gh["path"], repo, file, branch), _runner(repo, ("uv", "claude", "gh") if spec.get("at") else ("uv", "claude"), spec["runs_on"]), {k: spec[k] for k in ("profile", "model", "effort", "timeout", "worktree", "runs_on")}
+        return calendar_entries(fields_of(spec)), dispatcher_argv(gh["path"], repo, file, branch), _runner(repo, ("uv", "claude", "gh") if spec.get("at") else ("uv", "claude"), spec["runs_on"]), {k: spec[k] for k in ("profile", "model", "effort", "timeout", "worktree", "pull", "runs_on")}
 
     if dry_run:
         file, spec, text = refusals_first()

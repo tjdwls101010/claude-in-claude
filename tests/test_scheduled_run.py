@@ -60,10 +60,10 @@ class Job(Sandbox):
         env.update(extra or {})
         return env
 
-    def args(self, step, profile=None, cron="0 3 * * *", at=None, worktree=False, timeout=600, project=None, name="nightly"):
+    def args(self, step, profile=None, cron="0 3 * * *", at=None, worktree=False, timeout=600, project=None, name="nightly", pull=True):
         a = ["__scheduled", step, "--name", name, "--project", str(project or self.project), "--profile", profile or self.profile, "--model", "haiku", "--effort", "low", "--timeout", str(timeout), "--timezone", "Asia/Seoul"]
         a += ["--at", at] if at else ["--cron", cron]
-        return a + (["--worktree"] if worktree else [])
+        return a + (["--worktree"] if worktree else []) + ([] if pull else ["--no-pull"])
 
     def step(self, step, env, **kw):
         return self.cli(*self.args(step, **kw), env=env, timeout=120)
@@ -530,6 +530,14 @@ class LocalCheckout(Job):
         finish = self.step("finish", env)
         self.assertEqual(finish.returncode, 1)
         self.assertEqual(self.head(), before)
+
+    def test_no_pull_leaves_the_checkout(self):
+        before = self.head()
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, worktree=True, pull=False)
+        self.assertEqual((run.returncode, finish.returncode), (0, 0))
+        self.assertEqual(self.head(), before)
+        self.assertEqual(self.row(summary), "| **Local checkout** | left as it is (`--no-pull`) |")
+        self.assertNotIn("[!WARNING]", summary)
 
     def test_git_does_not_get_the_jobs_tokens(self):
         # The ext transport runs a shell command in git's own environment: it records that environment, then serves the repository.

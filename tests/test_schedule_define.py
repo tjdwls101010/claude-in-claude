@@ -209,6 +209,21 @@ class Schedule(Scheduling):
         self.assertEqual(again["workflow"]["status"], "unchanged")
         self.assertEqual(json.loads(self.committed().splitlines()[1][len("# spec: "):])["definition"], spec["definition"])
 
+    def test_no_pull_is_recorded_and_kept_until_pull(self):
+        reply = self.new("--no-pull")
+        self.assertIs(reply["settings"]["pull"], False)
+        self.assertIs(self.spec_of()["pull"], False)
+        self.assertEqual(self.committed().count(" --no-pull"), 2, "both steps: Run tells the worker, Finish leaves the checkout")
+        self.assertEqual(self.schedule()["workflow"]["status"], "unchanged")
+        self.assertEqual(self.schedule("--pull")["workflow"]["status"], "committed")
+        self.assertNotIn("pull", self.spec_of(), "on is the default and is not written, so workflows committed before it stay byte for byte")
+        self.assertNotIn("--no-pull", self.committed())
+        self.assertIs(self.schedule()["settings"]["pull"], True)
+
+    def test_pull_and_no_pull_together_are_refused(self):
+        reply = self.new("--pull", "--no-pull", expect=2)
+        self.assertIn("not allowed with", reply["error"])
+
     def test_an_empty_stdin_does_not_touch_the_prompt(self):
         self.new()
         before = self.committed()
