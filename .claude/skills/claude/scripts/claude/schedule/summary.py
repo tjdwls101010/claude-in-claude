@@ -165,7 +165,7 @@ def _tree_text(tree):
     tree = tree or {}
     kind = tree.get("kind")
     if kind == "worktree":
-        return f"worktree {code_span(tree['path'], True)} on {code_span(tree.get('branch') or '?', True)} from {code_span((tree.get('base') or '')[:7], True)}, a clean checkout of that commit; your checkout is not touched"
+        return f"worktree {code_span(tree['path'], True)} on {code_span(tree.get('branch') or '?', True)} from {code_span((tree.get('base') or '')[:7], True)}, a clean checkout of that commit; the worker did not touch your checkout"
     if kind == "checkout":
         where = f"{code_span(tree['branch'], True)}" if tree.get("branch") else "detached HEAD"
         n = tree.get("uncommitted_before")
@@ -174,6 +174,51 @@ def _tree_text(tree):
     if kind == "none":
         return f"{code_span(tree.get('path') or '?', True)}, not a git checkout"
     return "unknown"
+
+
+def _short(sha):
+    return code_span((sha or "?")[:7], True)
+
+
+def _local_text(local):
+    """The Local checkout row (K30): what bringing the project's checkout up to GitHub's default branch did."""
+    status = local.get("status")
+    branch = code_span(local.get("branch") or "the default branch", True)
+    n = len(local.get("commits") or []) + (local.get("more") or 0)
+    count = f"{n} commit{'s' if n != 1 else ''} from GitHub"
+    if status == "off":
+        return "left as it is (`--no-pull`)"
+    if status == "updated":
+        return f"{branch} fast-forwarded {_short(local.get('from'))} → {_short(local.get('to'))}, {count}"
+    if status == "ref_updated":
+        return f"{branch} moved {_short(local.get('from'))} → {_short(local.get('to'))}, {count}; another branch is checked out, so no file changed"
+    if status == "current":
+        return f"{branch} already matched GitHub"
+    return "not updated from GitHub (see the warning)"
+
+
+def _local_warning(local):
+    """The warning a checkout left behind gets: why, which files, and what to run."""
+    lines = [f"**Your checkout was not updated from GitHub:** {local.get('reason') or local.get('status')}."]
+    files = local.get("files") or []
+    if files:
+        lines.append(", ".join(code_span(f) for f in files[:20]) + (" …" if len(files) > 20 else ""))
+    if local.get("instead"):
+        lines.append(f"To do it yourself: {local['instead']}.")
+    return lines
+
+
+def _incoming(context):
+    """The commits the checkout took in from GitHub, newest first."""
+    local = context.get("local") or {}
+    commits = local.get("commits") or []
+    if not commits or local.get("status") not in ("updated", "ref_updated"):
+        return None
+    lines = [f"- {code_span(c['sha7'])} {_literal(_one_line(c['subject'], 200))}" for c in commits]
+    if local.get("more"):
+        lines.append(f"- … and {local['more']} more")
+    n = len(commits) + (local.get("more") or 0)
+    return _details(f"<b>From GitHub</b> · {n} commit{'s' if n != 1 else ''} now in {code_span(local.get('branch') or '?')} here", "\n".join(lines))
 
 
 def _run_text(snapshot):
@@ -236,6 +281,9 @@ def _alerts(snapshot, context):
         seen = context.get("attention") or []
         if seen:
             warning.append("**It needed attention while it ran**, which nobody could give: " + "; ".join(f"{a.get('reason')} at {a.get('at')}" for a in seen[:10]))
+    local = context.get("local") or {}
+    if local.get("status") in ("not_updated", "failed"):
+        warning += _local_warning(local)
     for w in context.get("warnings") or []:
         warning.append(w)
     note += context.get("notes") or []
@@ -468,7 +516,7 @@ def render_summary(snapshot, context):
 
 
 def _render(snapshot, context):
-    """The summary's markdown. `snapshot` is `observe.snapshot` of the run, or None when the job started no worker (skipped, a check, a refusal); `context` carries what the run cannot know: `name`, `timezone`, `trigger` ({kind, attempt, retry_of_url}), `slot`, `prompt`, `tree` (what the worker saw), `changes`, `attention` seen while it ran, `warnings` from the Finish step, `stopped_by_finish`, `outcome` (for no worker: {kind: skipped|check|refused|missing, …}), `continue` ({cli, project, run_dir}) and `log_call`."""
+    """The summary's markdown. `snapshot` is `observe.snapshot` of the run, or None when the job started no worker (skipped, a check, a refusal); `context` carries what the run cannot know: `name`, `timezone`, `trigger` ({kind, attempt, retry_of_url}), `slot`, `prompt`, `tree` (what the worker saw), `changes`, `local` (what bringing the checkout up to GitHub did, `git.sync_default`'s reply or {status: off}), `attention` seen while it ran, `warnings` from the Finish step, `stopped_by_finish`, `outcome` (for no worker: {kind: skipped|check|refused|missing, …}), `continue` ({cli, project, run_dir}) and `log_call`."""
     cuts = []
     parts = [_title(snapshot, context)]
     started = (snapshot["meta"].get("started_at") or snapshot["meta"].get("created_at")) if snapshot else context.get("at")
@@ -479,6 +527,8 @@ def _render(snapshot, context):
         rows.append(("Trigger", _trigger_text(context, started, "started" if snapshot else "at")))
     if context.get("tree"):
         rows.append(("Local tree", _tree_text(context["tree"])))
+    if context.get("local"):
+        rows.append(("Local checkout", _local_text(context["local"])))
     outcome = context.get("outcome") or {}
     if snapshot is None and outcome.get("kind") == "check":
         rows += [(c["name"], ("✅ " if c["ok"] else "❌ ") + c["detail"]) for c in outcome.get("checks") or []]
@@ -492,7 +542,7 @@ def _render(snapshot, context):
         answer = _answer(snapshot, context, cuts)
         if answer:
             parts.append(answer)
-        tail = [x for x in (_changes(snapshot, context), _activity(snapshot, context, cuts) if _limit(context, "activity", True) else None, _continue(snapshot, context)) if x]
+        tail = [x for x in (_incoming(context), _changes(snapshot, context), _activity(snapshot, context, cuts) if _limit(context, "activity", True) else None, _continue(snapshot, context)) if x]
         if tail:
             parts.append("---")
             parts += tail

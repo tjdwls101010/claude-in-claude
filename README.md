@@ -84,7 +84,8 @@ schedule ──▶ GitHub API ──▶ .github/workflows/NAME.yml on the defaul
 
 on time:  LaunchAgent ── gh workflow run ──▶ GitHub ──▶ this repository's self-hosted runner (this Mac)
             Run:    the worker starts as `start` would, under your login, and the job holds it to its end
-            Finish: stops whatever is still alive, records what changed, writes the run's summary
+            Finish: stops whatever is still alive, records what changed, brings your checkout's default
+                    branch up to GitHub's, writes the run's summary
 ```
 
 It needs:
@@ -108,6 +109,8 @@ uv run "$CLI" schedule --name 270225_NVDA_Q4 "Read NVDA's Q4 results and update 
 `--name` is used as given for the workflow file and for its title in Actions, so the second schedule is `270225_NVDA_Q4.yml` there.
 
 Times are in this Mac's time zone. Each run's page on GitHub shows a summary: the outcome, the trigger and the tree the worker saw, alerts (failures, denied tool calls), the prompt, the worker's answer, what changed, its activity (trimmed when long), and the commands to continue the session on your Mac; the run is also in `.claude-runs/` like any other, so `status`, `log`, `result` and `resume` work on it. `--at YYYY-MM-DDTHH:MM` runs once and then turns its workflow off. `--worktree` gives each writing run its own checkout of your local HEAD. Pausing is disabling the workflow (`gh workflow disable`); re-running and cancelling are GitHub's too.
+
+What a run merges on GitHub reaches this Mac by itself: when a run ends, whatever its outcome, the job fast-forwards the default branch of your checkout to GitHub's (and `schedule` and `unschedule` do the same right after their commit). It never goes over anything of yours — a file you changed that the incoming commits also change, an untracked or ignored file they would replace, a commit only here, a merge or rebase in progress, or a run working in the checkout itself leave the checkout as it is, and the run's summary says why and what to run; the next run's end tries again. So a worker told to open and merge a pull request needs no "then pull" in its prompt (from its worktree it could not anyway). `--no-pull` turns this off for a schedule whose checkout you work in on its default branch.
 
 ## 6. Project Status
 

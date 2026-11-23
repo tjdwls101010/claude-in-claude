@@ -95,6 +95,40 @@ class Rendered(unittest.TestCase):
         self.assertNotIn("<b>Changes</b>", text)
         self.assertEqual(self.sections(text), ["# ", "| **Run**", "[!WARNING]", "<b>Prompt</b>", "---", "<b>Activity</b>", "<b>Continue on your Mac</b>"])
 
+    def local_row(self, text):
+        return next(l for l in text.splitlines() if l.startswith("| **Local checkout** |"))
+
+    def test_the_local_checkout_row(self):
+        commit = {"sha7": "c852816", "subject": "docs: ANT *첫* 종가 [대조] (#179)"}
+        cases = [
+            ({"status": "updated", "branch": "main", "from": "b2bf7285d8c6", "to": "c8528163b0aa", "commits": [commit], "more": 0}, "| **Local checkout** | `main` fast-forwarded `b2bf728` → `c852816`, 1 commit from GitHub |"),
+            ({"status": "ref_updated", "branch": "main", "from": "b2bf7285d8c6", "to": "c8528163b0aa", "commits": [commit], "more": 2}, "| **Local checkout** | `main` moved `b2bf728` → `c852816`, 3 commits from GitHub; another branch is checked out, so no file changed |"),
+            ({"status": "current", "branch": "main", "commits": [], "more": 0}, "| **Local checkout** | `main` already matched GitHub |"),
+            ({"status": "off"}, "| **Local checkout** | left as it is (`--no-pull`) |"),
+            ({"status": "not_updated", "branch": "main", "reason": "you have changes to 1 file that the incoming commits also change", "files": ["README.md"], "instead": "commit, move or remove it, then `git -C /work/project merge --ff-only origin/main`"}, "| **Local checkout** | not updated from GitHub (see the warning) |"),
+        ]
+        for local, row in cases:
+            with self.subTest(local["status"]):
+                text = schedule.render_summary(self.run_dir(), self.context(local=local))
+                self.assertEqual(self.local_row(text), row)
+                shutil.rmtree(self.reg / RUN_ID)
+
+    def test_commits_from_github_are_listed_as_their_text(self):
+        local = {"status": "updated", "branch": "main", "from": "b2bf728", "to": "c852816", "commits": [{"sha7": "c852816", "subject": "docs: ANT *첫* 종가 [대조] (#179)"}], "more": 4}
+        text = schedule.render_summary(self.run_dir(), self.context(local=local))
+        block = text.split("<b>From GitHub</b>", 1)[1].split("</details>", 1)[0]
+        self.assertIn(" · 5 commits now in `main` here</summary>", block)
+        self.assertIn("- `c852816` docs\\: ANT \\*첫\\* 종가 \\[대조\\] \\(\\#179\\)\n", block)
+        self.assertIn("- … and 4 more", block)
+        self.assertLess(text.index("<b>From GitHub</b>"), text.index("<b>Changes</b>"))
+
+    def test_a_checkout_left_behind_is_a_warning_with_what_to_run(self):
+        local = {"status": "not_updated", "branch": "main", "reason": "you have changes to 1 file that the incoming commits also change", "files": ["README.md"], "instead": "commit, move or remove it, then `git -C /work/project merge --ff-only origin/main`"}
+        text = schedule.render_summary(self.run_dir(), self.context(local=local))
+        warning = text.split("> [!WARNING]\n", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("> **Your checkout was not updated from GitHub:** you have changes to 1 file that the incoming commits also change.\n> `README.md`\n> To do it yourself: commit, move or remove it, then `git -C /work/project merge --ff-only origin/main`.", warning)
+        self.assertNotIn("<b>From GitHub</b>", text)
+
     def test_schema_answer_is_a_json_block_and_missing_json_is_red(self):
         schema = {"profile": "read-only", "model": "haiku", "effort": "low", "schema_text": '{"type": "object"}', "timeout": None}
         text = schedule.render_summary(self.run_dir("schema.jsonl", settings=schema, init=None), self.context())

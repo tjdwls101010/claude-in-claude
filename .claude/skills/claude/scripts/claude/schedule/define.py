@@ -7,14 +7,15 @@ import shlex
 from pathlib import Path
 
 from claude.errors import Refusal
-from claude.git import main_checkout, remote_url, toplevel
-from claude.github import GitHubError, delete_workflow, gh_status, legacy_workflow_file, list_workflow_files, local_runners, parse_spec, read_workflow, render_workflow, repo_facts, repo_from_remote, reserved_name, runner_problems, runners, set_workflow_enabled, workflow_file, workflow_state, workflow_states, write_workflow
+from claude.git import branch_contains, main_checkout, remote_url, toplevel
+from claude.github import GitHubError, delete_workflow, gh_status, legacy_workflow_file, list_workflow_files, local_runners, parse_spec, read_workflow, render_workflow, repo_facts, repo_from_remote, reserved_name, runner_problems, runners, scrub_job_env, set_workflow_enabled, workflow_file, workflow_state, workflow_states, write_workflow
 from claude.launchd import agent_state, agents_dir, calendar_entries, install_agent, label_problem, list_agents, remove_agent, render_agent, supported, system_timezone
 from claude.registry import latest_job, read_meta, remove_schedule_state, resolve_runs_dir, schedule_dir, schedule_lock, schedule_runs_live, schedule_state_holder, write_definition
 from claude.runs import refuse_inside_worker
 from claude.util import entry_path, iso, path_key
 
 from .execute import clock, local_time
+from .local import left_alone, sync_local
 from .spec import bad, check_name, dispatcher_holder, dispatcher_label, fields_of, holder_words, merge, was_old_name
 from .times import fire_times
 
@@ -112,6 +113,17 @@ def _runner(repo, tools, runs_on):
     return {"registered": registered, "local": local, "problems": runner_problems(registered, local, tools, runs_on)}
 
 
+def _local(project, registry, repo, commit=None):
+    """K30: the checkout brought up to the default branch this command just committed to (or, when it committed nothing, to whatever is there, so a call repeated after an update left undone completes it), by the rules a run's end follows; with `contains_commit` when it committed. A failed update is said here and is not the command's failure: the commit is made."""
+    try:
+        local = sync_local(project, registry, expect_repo=repo)
+    except Exception as e:  # the commit is made; what is left undone is said, not raised
+        local = left_alone(project, f"the update could not be tried: {getattr(e, 'message', None) or repr(e)}") | {"status": "failed"}
+    if commit:
+        local["contains_commit"] = branch_contains(local["path"], local.get("branch"), commit, env=scrub_job_env(os.environ))
+    return local
+
+
 def _fires(spec, now):
     out = {"timezone": spec["timezone"], "cron": spec.get("cron"), "at": spec.get("at"), "next": [local_time(t, spec["timezone"]) for t in fire_times(spec, now, 3)]}
     return out
@@ -178,7 +190,7 @@ def schedule(*, name, flags, cwd, dry_run=False, public_ok=False, message=None):
 
     def derived(file, spec):
         """Everything that follows from the file and spec finally committed: the dispatcher's calendar and command, the runner check, the reply's settings."""
-        return calendar_entries(fields_of(spec)), dispatcher_argv(gh["path"], repo, file, branch), _runner(repo, ("uv", "claude", "gh") if spec.get("at") else ("uv", "claude"), spec["runs_on"]), {k: spec[k] for k in ("profile", "model", "effort", "timeout", "worktree", "runs_on")}
+        return calendar_entries(fields_of(spec)), dispatcher_argv(gh["path"], repo, file, branch), _runner(repo, ("uv", "claude", "gh") if spec.get("at") else ("uv", "claude"), spec["runs_on"]), {k: spec[k] for k in ("profile", "model", "effort", "timeout", "worktree", "pull", "runs_on")}
 
     if dry_run:
         file, spec, text = refusals_first()
@@ -243,6 +255,7 @@ def schedule(*, name, flags, cwd, dry_run=False, public_ok=False, message=None):
         "fires": _fires(spec, now),
         "settings": settings,
         "runner": runner,
+        "local": _local(project, registry, repo, commit),
         "warnings": warnings,
         "next": {"command": f"gh workflow run {shlex.quote(file)} --repo {repo} -f mode=check", "why": "a check job on the runner is the only proof the service can log in and start a worker; read its summary on the run page"},
     }
@@ -298,6 +311,7 @@ def unschedule(*, name, cwd, message=None):
             remove_schedule_state(registry, name)
         if notes:
             reply["note"] = "; ".join(notes)
+    reply["local"] = _local(project, registry, repo, reply["workflow"].get("commit"))
     return reply
 
 

@@ -1,4 +1,4 @@
-"""The git unit against real throwaway repositories: top level, the main checkout seen from a linked worktree, a bare repository and a submodule, and the uncommitted count."""
+"""The git unit against real throwaway repositories: top level, the main checkout seen from a linked worktree, a bare repository and a submodule, the uncommitted count, and bringing a default branch up to its origin."""
 
 from __future__ import annotations
 
@@ -64,6 +64,16 @@ class Repo(unittest.TestCase):
         empty.mkdir()
         git(empty, "init", "-q")
         self.assertIsNone(g.head_commit(str(empty)))
+
+    def test_remote_url_is_the_configured_one(self):
+        self.assertIsNone(g.remote_url(str(self.repo)))
+        git(self.repo, "remote", "add", "origin", "https://github.com/someone/project.git")
+        # A rewrite changes where git connects, not which repository the remote names.
+        git(self.repo, "config", "url./elsewhere/mirror.git.insteadOf", "https://github.com/someone/project.git")
+        self.assertEqual(g.remote_url(str(self.repo)), "https://github.com/someone/project.git")
+        # With several URLs, fetch uses the first; `config --get` alone would read the last (codex review LS03).
+        git(self.repo, "config", "--add", "remote.origin.url", "https://github.com/someone/else.git")
+        self.assertEqual(g.remote_url(str(self.repo)), "https://github.com/someone/project.git")
 
     def test_paths_are_nfc(self):
         decomposed = self.root / "café"
@@ -206,3 +216,275 @@ class TreeSnapshot(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DefaultBranchSync(unittest.TestCase):
+    """`sync_default` against a real bare origin: a second clone pushes what a scheduled worker would merge on GitHub, and the checkout under test is a person's, with their own edits. What is expected comes from git itself (the origin's commit, the files on disk), not from the module."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        seed = make_repo(self.root / "seed", {"a.txt": "a\n", "b.txt": "b\n", "pkg/c.txt": "c\n", ".gitignore": "secret\n"})
+        self.origin = self.root / "origin.git"
+        git(self.root, "clone", "-q", "--bare", str(seed), str(self.origin))
+        self.local = self.clone("local")
+        self.other = self.clone("other")
+        self.env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+    def clone(self, name):
+        path = self.root / name
+        git(self.root, "clone", "-q", str(self.origin), str(path))
+        git(path, "config", "user.email", "t@example.com")
+        git(path, "config", "user.name", "t")
+        return path
+
+    def land(self, files, message, remove=()):
+        """A commit on origin's main, as a merged pull request leaves one; its sha."""
+        git(self.other, "pull", "-q", "--ff-only")
+        for rel, text in files.items():
+            p = self.other / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
+        for rel in remove:
+            git(self.other, "rm", "-q", "-r", rel)
+        git(self.other, "add", "-A")
+        git(self.other, "commit", "-q", "-m", message)
+        git(self.other, "push", "-q", "origin", "main")
+        return git(self.other, "rev-parse", "HEAD")
+
+    def sync(self, path=None, **kw):
+        return g.sync_default(str(path or self.local), env=self.env, **kw)
+
+    def head(self, ref="HEAD"):
+        return git(self.local, "rev-parse", ref)
+
+    def test_fast_forwards_the_checked_out_default_branch(self):
+        before = self.head()
+        self.land({"b.txt": "b2\n"}, "first")
+        sha = self.land({"new.md": "n\n"}, "second")
+        r = self.sync()
+        self.assertEqual((r["status"], r["files_updated"], r["branch"], r["path"]), ("updated", True, "main", str(self.local)))
+        self.assertEqual((r["from"], r["to"]), (before, sha))
+        self.assertEqual(self.head(), sha)
+        self.assertEqual([c["subject"] for c in r["commits"]], ["second", "first"])
+        self.assertEqual((self.local / "new.md").read_text(), "n\n")
+
+    def test_already_current(self):
+        r = self.sync()
+        self.assertEqual(r["status"], "current")
+        self.assertEqual(r["from"], r["to"])
+
+    def test_keeps_uncommitted_changes_the_commits_do_not_touch(self):
+        (self.local / "a.txt").write_text("mine\n")
+        (self.local / "scratch.txt").write_text("s\n")
+        sha = self.land({"b.txt": "b2\n"}, "theirs")
+        self.assertEqual(self.sync()["status"], "updated")
+        self.assertEqual(self.head(), sha)
+        self.assertEqual((self.local / "a.txt").read_text(), "mine\n")
+        self.assertEqual((self.local / "scratch.txt").read_text(), "s\n")
+        self.assertEqual((self.local / "b.txt").read_text(), "b2\n")
+
+    def test_never_over_a_changed_file(self):
+        before = self.head()
+        (self.local / "a.txt").write_text("mine\n")
+        self.land({"a.txt": "theirs\n"}, "theirs")
+        r = self.sync()
+        self.assertEqual((r["status"], r["files"]), ("not_updated", ["a.txt"]))
+        self.assertIn("1 file", r["reason"])
+        self.assertIn("merge --ff-only --no-overwrite-ignore origin/main", r["instead"])
+        self.assertEqual(self.head(), before)
+        self.assertEqual((self.local / "a.txt").read_text(), "mine\n")
+
+    def test_never_over_an_untracked_file(self):
+        before = self.head()
+        (self.local / "new.md").write_text("mine\n")
+        self.land({"new.md": "theirs\n"}, "theirs")
+        r = self.sync()
+        self.assertEqual((r["status"], r["files"]), ("not_updated", ["new.md"]))
+        self.assertEqual(self.head(), before)
+        self.assertEqual((self.local / "new.md").read_text(), "mine\n")
+
+    def test_never_over_an_ignored_file(self):
+        # git's default merge overwrites an ignored file with a tracked one of the same path (checked by hand); --no-overwrite-ignore keeps it.
+        before = self.head()
+        (self.local / "secret").write_text("LOCAL ONLY\n")
+        self.land({"secret": "remote\n", ".gitignore": ""}, "track secret")
+        r = self.sync()
+        self.assertEqual((r["status"], r["files"]), ("not_updated", ["secret"]))
+        self.assertEqual(self.head(), before)
+        self.assertEqual((self.local / "secret").read_text(), "LOCAL ONLY\n")
+
+    def test_local_commits_are_left_alone(self):
+        (self.local / "a.txt").write_text("mine\n")
+        git(self.local, "commit", "-q", "-am", "mine")
+        mine = self.head()
+        r = self.sync()
+        self.assertEqual(r["status"], "not_updated")
+        self.assertIn("1 commit", r["reason"])
+        self.land({"b.txt": "b2\n"}, "theirs")
+        r = self.sync()
+        self.assertEqual(r["status"], "not_updated")
+        self.assertIn("apart", r["reason"])
+        self.assertEqual(self.head(), mine)
+
+    def test_another_branch_checked_out_moves_only_the_default_branch(self):
+        git(self.local, "switch", "-q", "-c", "side")
+        (self.local / "a.txt").write_text("side\n")
+        git(self.local, "commit", "-q", "-am", "side")
+        side = self.head()
+        sha = self.land({"a.txt": "theirs\n"}, "theirs")
+        r = self.sync()
+        self.assertEqual((r["status"], r["files_updated"]), ("ref_updated", False))
+        self.assertEqual(self.head("refs/heads/main"), sha)
+        self.assertEqual(self.head(), side)
+        self.assertEqual((self.local / "a.txt").read_text(), "side\n")
+        self.assertEqual([c["subject"] for c in r["commits"]], ["theirs"])
+
+    def test_no_local_default_branch(self):
+        git(self.local, "switch", "-q", "-c", "side")
+        git(self.local, "branch", "-q", "-D", "main")
+        self.land({"b.txt": "b2\n"}, "theirs")
+        r = self.sync()
+        self.assertEqual(r["status"], "not_updated")
+        self.assertIn("no local branch main", r["reason"])
+
+    def test_default_branch_checked_out_in_another_worktree(self):
+        git(self.local, "switch", "-q", "-c", "side")
+        wt = self.root / "wt"
+        git(self.local, "worktree", "add", "-q", str(wt), "main")
+        before = self.head("refs/heads/main")
+        self.land({"b.txt": "b2\n"}, "theirs")
+        r = self.sync()
+        self.assertEqual(r["status"], "not_updated")
+        self.assertIn("checked out", r["reason"])
+        self.assertEqual(self.head("refs/heads/main"), before)
+
+    def test_a_merge_in_progress_is_left_alone(self):
+        git(self.local, "switch", "-q", "-c", "side")
+        (self.local / "a.txt").write_text("side\n")
+        git(self.local, "commit", "-q", "-am", "side")
+        git(self.local, "switch", "-q", "main")
+        (self.local / "a.txt").write_text("main\n")
+        git(self.local, "commit", "-q", "-am", "main")
+        git(self.local, "merge", "-q", "side", check=False)
+        self.land({"b.txt": "b2\n"}, "theirs")
+        r = self.sync()
+        self.assertEqual(r["status"], "not_updated")
+        self.assertIn("merge", r["reason"])
+
+    def test_fetches_the_branch_by_name_whatever_the_fetch_refspec(self):
+        git(self.local, "config", "remote.origin.fetch", "+refs/heads/other:refs/remotes/origin/other")
+        sha = self.land({"b.txt": "b2\n"}, "theirs")
+        self.assertEqual(self.sync()["status"], "updated")
+        self.assertEqual(self.head(), sha)
+
+    def test_origin_unreachable(self):
+        git(self.local, "remote", "set-url", "origin", str(self.root / "gone.git"))
+        r = self.sync()
+        self.assertEqual(r["status"], "failed")
+        self.assertIn("origin could not be read", r["reason"])
+
+    def test_hooks_do_not_run(self):
+        hook = self.local / ".git" / "hooks" / "post-merge"
+        hook.write_text(f"#!/bin/sh\ntouch {self.root / 'hook-ran'}\n")
+        hook.chmod(0o755)
+        self.land({"b.txt": "b2\n"}, "theirs")
+        self.assertEqual(self.sync()["status"], "updated")
+        self.assertFalse((self.root / "hook-ran").exists())
+
+    def test_a_subdirectory_the_update_removes(self):
+        sha = self.land({}, "drop pkg", remove=("pkg",))
+        r = self.sync(self.local / "pkg")
+        self.assertEqual((r["status"], r["path"]), ("updated", str(self.local)))
+        self.assertEqual(self.head(), sha)
+        self.assertFalse((self.local / "pkg").exists())
+
+    def test_fetch_only(self):
+        before = self.head()
+        sha = self.land({"b.txt": "b2\n"}, "theirs")
+        r = self.sync(fetch_only=True)
+        self.assertEqual((r["status"], r["to"]), ("fetched", sha))
+        self.assertEqual(self.head(), before)
+        self.assertEqual(self.head("refs/remotes/origin/main"), sha)
+
+    def test_not_a_checkout(self):
+        plain = self.root / "plain"
+        plain.mkdir()
+        self.assertEqual(self.sync(plain)["status"], "failed")
+
+    # What the person's own git settings must not turn into (codex review LS01, LS02, LS06, LS08), each reproduced against plain git first.
+
+    def test_an_autostash_setting_does_not_carry_a_change_into_a_conflict(self):
+        git(self.local, "config", "merge.autostash", "true")
+        before = self.head()
+        (self.local / "a.txt").write_text("mine\n")
+        self.land({"a.txt": "theirs\n"}, "theirs")
+        r = self.sync()
+        self.assertEqual((r["status"], r["files"]), ("not_updated", ["a.txt"]))
+        self.assertEqual(self.head(), before)
+        self.assertEqual((self.local / "a.txt").read_text(), "mine\n")
+        self.assertEqual(git(self.local, "status", "--porcelain"), "M a.txt")
+
+    def test_a_squash_merge_option_does_not_stop_the_branch_moving(self):
+        git(self.local, "config", "branch.main.mergeOptions", "--squash")
+        sha = self.land({"b.txt": "b2\n"}, "theirs")
+        self.assertEqual(self.sync()["status"], "updated")
+        self.assertEqual(self.head(), sha)
+        self.assertEqual(git(self.local, "status", "--porcelain"), "")
+
+    def test_a_configured_refmap_moves_no_other_branch(self):
+        git(self.local, "switch", "-q", "-c", "side")
+        (self.local / "a.txt").write_text("side\n")
+        git(self.local, "commit", "-q", "-am", "side only")
+        side = self.head()
+        git(self.local, "switch", "-q", "main")
+        git(self.local, "config", "--add", "remote.origin.fetch", "+refs/heads/main:refs/heads/side")
+        sha = self.land({"b.txt": "b2\n"}, "theirs")
+        self.assertEqual(self.sync()["status"], "updated")
+        self.assertEqual(self.head(), sha)
+        self.assertEqual(self.head("refs/heads/side"), side)
+
+    def test_fetch_head_is_left_alone(self):
+        git(self.local, "fetch", "-q", "origin")
+        fetch_head = (self.local / ".git" / "FETCH_HEAD").read_text()
+        self.land({"b.txt": "b2\n"}, "theirs")
+        self.sync()
+        self.assertEqual((self.local / ".git" / "FETCH_HEAD").read_text(), fetch_head)
+
+    def test_a_directory_the_commits_replace_is_named(self):
+        (self.local / ".gitignore").write_text("secret\ncache/\n")
+        git(self.local, "commit", "-q", "-am", "ignore cache")
+        git(self.local, "push", "-q", "origin", "main")
+        (self.local / "cache").mkdir()
+        (self.local / "cache" / "x").write_text("mine\n")
+        self.land({"cache": "a file now\n", ".gitignore": "secret\n"}, "cache is a file")
+        r = self.sync()
+        self.assertEqual((r["status"], r["files"]), ("not_updated", ["cache"]))
+        self.assertEqual((self.local / "cache" / "x").read_text(), "mine\n")
+
+    def test_a_log_encoding_setting_does_not_break_the_report(self):
+        git(self.local, "config", "i18n.logOutputEncoding", "ISO-8859-1")
+        sha = self.land({"b.txt": "b2\n"}, "café")
+        r = self.sync()
+        self.assertEqual(r["status"], "updated")
+        self.assertEqual(self.head(), sha)
+        self.assertEqual(r["commits"][0]["subject"], "café")
+
+    def test_a_guard_is_asked_right_before_the_change(self):
+        before = self.head()
+        sha = self.land({"b.txt": "b2\n"}, "theirs")
+        r = self.sync(guard=lambda: "run r1 is working in this checkout")
+        self.assertEqual((r["status"], r["reason"], r["to"]), ("not_updated", "run r1 is working in this checkout", sha))
+        self.assertEqual(self.head(), before)
+        self.assertEqual(self.sync(guard=lambda: None)["status"], "updated")
+
+    def test_a_refused_path_is_named_as_it_is(self):
+        # Codex review R2-07: only git's indentation is taken off a listed path.
+        (self.local / " f ").write_text("mine\n")
+        self.land({" f ": "theirs\n"}, "theirs")
+        self.assertEqual(self.sync()["files"], [" f "])
+
+    def test_the_suggested_command_keeps_the_safety_flags(self):
+        (self.local / "a.txt").write_text("mine\n")
+        self.land({"a.txt": "theirs\n"}, "theirs")
+        self.assertIn("merge --ff-only --no-overwrite-ignore origin/main", self.sync()["instead"])

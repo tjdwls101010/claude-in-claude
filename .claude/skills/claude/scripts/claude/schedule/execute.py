@@ -1,4 +1,4 @@
-"""A scheduled job's two steps on the runner (K1): `Run` starts the worker and holds the job until it ends; `Finish`, which GitHub runs after any end — success, failure, a cancel, a timeout — stops what is still alive, records what changed, cleans up and writes the summary.
+"""A scheduled job's two steps on the runner (K1): `Run` starts the worker and holds the job until it ends; `Finish`, which GitHub runs after any end — success, failure, a cancel, a timeout — stops what is still alive, records what changed, brings the project's checkout up to what GitHub's default branch holds (K30), cleans up and writes the summary.
 
 Run, in order (K28): the project must exist (K23); a check only checks (K13); an automatic trigger decides and claims its slot (K4), any other job is recorded; refusals that cost nothing come before the worker; the worker is started under the schedule's origin; the step follows it to its end, printing its activity and warning on attention without stopping it; the exit code is the run's outcome.
 
@@ -7,6 +7,7 @@ Finish's stages are independent (K20): each failure is collected into the summar
 
 from __future__ import annotations
 
+import contextlib
 import os
 import secrets
 import shlex
@@ -24,10 +25,11 @@ from claude.git import commits_beyond, committed_files, head_commit, numstat, st
 from claude.github import JOB_HANDLES, GitHubError, annotation, job_context, legacy_workflow_file, resume_commands, set_workflow_enabled, stop_commands, write_output, write_summary
 from claude.launchd import remove_agent
 from claude.observe import snapshot, wait_ended
-from claude.registry import claim_slot, claude_alive, find_by_origin_job, group_view, is_live, list_groups, read_definition, read_job, reap, record_job, resolve_runs_dir, schedule_dir, schedule_lock, update_job
+from claude.registry import claim_slot, claude_alive, find_by_origin_job, group_view, is_live, list_groups, read_definition, read_job, reap, record_job, resolve_runs_dir, schedule_dir, schedule_lock, sync_lock, update_job, update_meta
 from claude.runs import start, stop
-from claude.util import entry_path, invocation
+from claude.util import entry_path, invocation, now
 
+from .local import left_alone, sync_local
 from .spec import dispatcher_holder, dispatcher_label, holder_words, worktree_group
 from .summary import code_span, render_summary
 from .times import current_slot
@@ -114,8 +116,8 @@ def _scrub_worker_env():
             del os.environ[key]
 
 
-def _start_worker(spec, prompt, schema_path, registry, group, origin):
-    """Start the worker as `start` would, or — given a `group` — as that one-member `batch --worktree` group (K10). Returns (run_id, refusal)."""
+def _start_worker(spec, prompt, schema_path, registry, group, origin, on_published=None):
+    """Start the worker as `start` would, or — given a `group` — as that one-member `batch --worktree` group (K10). `on_published` is called once the run is in the registry (for `start`). Returns (run_id, refusal)."""
     s = spec["settings"]
     if group:
         reply = batch(name=group, task_args=[prompt], tasks_file=None, defaults={"profile": s["profile"], "model": s["model"], "effort": s["effort"], "schema": schema_path, "timeout": s["timeout"], "cwd": None}, cwd=spec["project"], use_worktrees=True, runs_dir=registry, origin=origin)
@@ -123,7 +125,7 @@ def _start_worker(spec, prompt, schema_path, registry, group, origin):
         if not member.get("run_id"):
             return None, member.get("error") or "the worktree member did not start"
         return member["run_id"], None
-    reply = start(prompt=prompt, cwd=spec["project"], flags={"profile": s["profile"], "model": s["model"], "effort": s["effort"], "schema": schema_path, "cwd": spec["project"]}, label=spec["name"], timeout=s["timeout"], runs_dir=registry, origin=origin)
+    reply = start(prompt=prompt, cwd=spec["project"], flags={"profile": s["profile"], "model": s["model"], "effort": s["effort"], "schema": schema_path, "cwd": spec["project"]}, label=spec["name"], timeout=s["timeout"], runs_dir=registry, origin=origin, on_published=on_published)
     return reply["run_id"], None
 
 
@@ -208,14 +210,28 @@ def scheduled_run(spec, env, write):
         schema_path = str(Path(schedule_dir(registry, name)) / f"schema-{job}.json")
         Path(schema_path).parent.mkdir(parents=True, exist_ok=True)
         Path(schema_path).write_text(env["CLAUDE_SCHEDULE_SCHEMA"], encoding="utf-8")
-    origin = {"kind": "schedule", "name": name, "trigger": trigger, "slot": slot, "job": job, "url": ctx["url"], "repository": ctx["repository"], "when": local_time(slot if slot is not None else clock(), spec["timezone"])}
+    origin = {"kind": "schedule", "name": name, "trigger": trigger, "slot": slot, "job": job, "url": ctx["url"], "repository": ctx["repository"], "when": local_time(slot if slot is not None else clock(), spec["timezone"]), "project": project, "pull": spec.get("pull") is not False}
     if retry_of:
         origin["retry_of"] = retry_of["job"]
     _scrub_worker_env()
+    # K27, K30: from the snapshot the run's changes are measured against until the run is in the registry — from then on it holds the checkout's updates off itself — nothing may update the checkout, or that would count as the run's change. The lock goes as soon as the run is published, not after the init wait.
+    held = contextlib.ExitStack()
     try:
-        run_id, refused = _start_worker(spec, prompt, schema_path, registry, group, origin)
+        if not spec.get("worktree"):
+            held.enter_context(sync_lock(registry))
+            update_job(registry, name, job, {"tree_before": status_snapshot(project)})
+        def published(meta):
+            # The run now holds updates off itself, until its Finish marks its changes read (K30).
+            if not spec.get("worktree"):
+                with contextlib.suppress(Refusal, OSError):
+                    update_meta(str(Path(registry) / meta["run_id"]), lambda m: m.setdefault("changes_read_at", None))
+            held.close()
+
+        run_id, refused = _start_worker(spec, prompt, schema_path, registry, group, origin, on_published=published)
     except Refusal as e:
         run_id, refused = None, e.message
+    finally:
+        held.close()
     if refused:
         update_job(registry, name, job, {"outcome": {"kind": "refused", "error": refused}})
         step.command(annotation("error", f"{name}: not started", refused))
@@ -397,6 +413,18 @@ def _post(step, name, ctx, text):
     return 0
 
 
+def _bring_local(spec, ctx, registry, run_id, unconfirmed):
+    """K30: the project's checkout brought up to what GitHub's default branch now holds — what the worker merged there included — unless the schedule says `--no-pull`, or the worker works in that checkout and could not be confirmed stopped. Never raises; the reply is `git.sync_default`'s, or `{status: off}`."""
+    if spec.get("pull") is False:
+        return {"status": "off"}
+    if unconfirmed and not spec.get("worktree"):
+        return left_alone(spec["project"], "the worker works in this checkout and could not be confirmed stopped")
+    try:
+        return sync_local(spec["project"], registry, expect_repo=ctx.get("repository"), skip_run=run_id)
+    except Exception as e:  # K20: a stage that fails becomes a warning; the summary must still be written.
+        return left_alone(spec["project"], f"the update could not be tried: {getattr(e, 'message', None) or repr(e)}") | {"status": "failed"}
+
+
 def scheduled_finish(spec, env, write):
     """The Finish step, run after any end of the job (K20): stop a worker still alive, read what changed, clean up a worktree that holds nothing, keep the summary beside the run and post it to the job. Returns 1 only when the worker could not be confirmed stopped or the step summary could not be written; every other failure is a warning in the summary."""
     step = Step(write)
@@ -443,8 +471,8 @@ def scheduled_finish(spec, env, write):
     warnings, unconfirmed, stopped_by_finish = [], None, False
     try:
         meta = reap(run_dir)
-    except Refusal as e:
-        meta, unconfirmed = None, f"its meta.json cannot be read ({e.message}), so whether the worker still runs is unknown"
+    except (Refusal, OSError) as e:
+        meta, unconfirmed = None, f"its meta.json cannot be read ({getattr(e, 'message', None) or e}), so whether the worker still runs is unknown"
     if meta is not None and is_live(meta):
         # The Run step was cancelled or timed out with the worker alive; the runner would kill it as the job ends and leave the run orphaned (probe 5).
         stopped_by_finish = True
@@ -452,8 +480,11 @@ def scheduled_finish(spec, env, write):
             stop(refs=[run_id], cwd=project, runs_dir=registry)
         except Refusal as e:
             warnings.append(f"Stopping the worker failed: {e.message}")
-        meta = reap(run_dir)
-        if is_live(meta) or claude_alive(meta):
+        try:
+            meta = reap(run_dir)
+        except (Refusal, OSError) as e:
+            meta, unconfirmed = None, f"its meta.json cannot be read after stop ({getattr(e, 'message', None) or e}), so whether the worker still runs is unknown"
+        if meta is not None and (is_live(meta) or claude_alive(meta)):
             unconfirmed = f"run {run_id} is still {meta.get('state')} after stop"
     snap = None
     if meta is not None:
@@ -468,13 +499,19 @@ def scheduled_finish(spec, env, write):
         except OSError as e:
             warnings.append(f"What changed could not be read: {e}")
     if changes is not None:
+        # From here what comes into the checkout is not this run's; another job's update need not wait for this one (K30).
+        with contextlib.suppress(Refusal, OSError):
+            update_meta(run_dir, lambda m: m.__setitem__("changes_read_at", now()))
+    # After the changes are read, so what comes in from GitHub is not counted as the run's (K27).
+    local = _bring_local(spec, ctx, registry, run_id, unconfirmed)
+    if changes is not None:
         changes.update(_clean_group(rec.get("group"), job, registry, project, warnings))
     notes, ended = _end_one_off(spec, ctx, registry, rec, (meta or {}).get("state"))
     warnings += ended
     if unconfirmed:
         warnings.insert(0, f"**The worker could not be confirmed stopped:** {unconfirmed}. Check this Mac, and `{invocation('stop', '--run', run_id, '--project', project)}`.")
     rel = os.path.relpath(run_dir, project)
-    context = {**base, "notes": notes, "tree": _tree(spec, rec, meta), "changes": changes, "attention": rec.get("attention") or [], "stopped_by_finish": stopped_by_finish, "continue": {"cli": entry_path(), "project": project, "run_dir": (run_dir if rel.startswith("..") else rel) + "/"}, "log_call": invocation("log", "--run", run_id, "--project", project)}
+    context = {**base, "notes": notes, "tree": _tree(spec, rec, meta), "changes": changes, "attention": rec.get("attention") or [], "local": local, "stopped_by_finish": stopped_by_finish, "continue": {"cli": entry_path(), "project": project, "run_dir": (run_dir if rel.startswith("..") else rel) + "/"}, "log_call": invocation("log", "--run", run_id, "--project", project)}
     if snap is None:
         context.update({"at": clock(), "outcome": {"kind": "none", "title": "unreadable run", "error": f"Run {run_id} cannot be read."}})
     text = _render_kept(snap, context, warnings, str(Path(run_dir) / "summary.md"))
@@ -485,6 +522,8 @@ def scheduled_finish(spec, env, write):
             write_output(ctx["output_path"], {"run_id": run_id, "state": state})
         except OSError:
             pass
+    if local.get("status") in ("not_updated", "failed"):
+        step.command(annotation("warning", f"{name}: checkout not updated", local.get("reason") or local["status"]))
     if (state in RED and not stopped_by_finish) or (snap is not None and state == "completed" and snap["schema"] and snap["json"] is None):
         step.command(annotation("error", f"{name} failed", (meta or {}).get("error") or state))
     if unconfirmed:

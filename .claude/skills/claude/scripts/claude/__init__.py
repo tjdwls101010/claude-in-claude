@@ -4,12 +4,12 @@ Features (one per reason to change):
     runs/        start, resume, send and stop; creating a run and the detached supervisor that drives one `claude -p` process
     batch/       several runs as one named group, worktree isolation for its members, and clean
     observe/     status, log and result, including `result --wait` and the attention that ends a wait early; `snapshot` and `wait_ended`, the structure they render, for callers that read a run without parsing text
-    schedule/    schedule, unschedule and --list (a workflow committed through the GitHub API and a LaunchAgent that fires it), a scheduled job's Run and Finish steps on a self-hosted runner, the slot a trigger fills, and the summary it posts
+    schedule/    schedule, unschedule and --list (a workflow committed through the GitHub API and a LaunchAgent that fires it), a scheduled job's Run and Finish steps on a self-hosted runner, the slot a trigger fills, the summary it posts, and bringing the project's checkout up to what a schedule left on GitHub
     doctor.py    the environment a run would start in, and the account's usage limits
 
 Systems (formats someone else owns):
     claude_cli/  everything about the Claude Code CLI: argv and profiles, the worker's environment, stream-json in and out, version, auth, settings files
-    git/         the git CLI: top level, main checkout, worktrees, branches, a checkout's state before and after a run
+    git/         the git CLI: top level, main checkout, worktrees, branches, a checkout's state before and after a run, and bringing a default branch up to its origin
     github/      GitHub through gh (login, repository, workflow files, workflow state, runners), the workflow file's YAML and spec line, this Mac's runner services, and inside a job its environment, handles, step summaries and workflow commands
     launchd/     LaunchAgents: the dispatcher plist, its calendar, loading and unloading it, this Mac's time zone
 

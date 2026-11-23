@@ -29,6 +29,12 @@ def _lock(registry, name):
     return locked(Path(registry) / ".locks" / f"schedule-{name}.lock")
 
 
+def sync_lock(registry):
+    """The lock under which this repository's checkout is brought up to its origin (K30), so two jobs ending together, or a job and `schedule`, do not fetch and fast-forward one checkout at once."""
+    ensure_runs_dir(registry)
+    return locked(Path(registry) / ".locks" / "sync.lock")
+
+
 def schedule_state(registry, name):
     """The schedule's state as stored, or None when there is none."""
     return read_json(_state_path(registry, name))

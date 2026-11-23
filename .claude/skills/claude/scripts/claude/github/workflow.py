@@ -100,6 +100,8 @@ def _step_args(step, spec):
     args += ["--timezone", spec["timezone"]]
     if spec.get("worktree"):
         args.append("--worktree")
+    if spec.get("pull") is False:
+        args.append("--no-pull")
     args += ["--workflow", _file(spec), "--definition", spec["definition"]]
     return _string(f'uv run {_q(spec["cli"])} ' + " ".join(_q(a) for a in args))
 
@@ -119,7 +121,7 @@ def _env(spec, indent, token):
 
 
 def render_workflow(spec):
-    """The workflow text for `spec` (see SPEC_KEYS, plus `file`, the workflow file the text is for — default the name's own): the schedule's name as the title Actions shows (for a file with the old prefix, the title such files had, so whatever refers to it by title still does), a cron or a one-off `at` in `timezone`, a manual `mode` (run or check) and the dispatcher's `source` input, `concurrency` that queues every trigger in order (K5), a job on the runners `runs_on` names, limited to the run's timeout plus 10 minutes, with a Run step and an always-run Finish step that take the same flags and environment (K19). Only a one-off asks for `actions: write`, which its Finish step needs to disable the workflow (K7, K8)."""
+    """The workflow text for `spec` (see SPEC_KEYS, plus `pull`, written only when False, and `file`, the workflow file the text is for — default the name's own): the schedule's name as the title Actions shows (for a file with the old prefix, the title such files had, so whatever refers to it by title still does), a cron or a one-off `at` in `timezone`, a manual `mode` (run or check) and the dispatcher's `source` input, `concurrency` that queues every trigger in order (K5), a job on the runners `runs_on` names, limited to the run's timeout plus 10 minutes, with a Run step and an always-run Finish step that take the same flags and environment (K19). Only a one-off asks for `actions: write`, which its Finish step needs to disable the workflow (K7, K8)."""
     name = spec["name"]
     title = f"claude · {name}" if _file(spec) == legacy_workflow_file(name) else name
     if spec.get("at"):
@@ -129,6 +131,9 @@ def render_workflow(spec):
     else:
         cron = spec["cron"]
     record = {k: spec.get(k) for k in SPEC_KEYS}
+    # Updating the checkout is on unless the spec turns it off, and only off is written: workflows committed before the setting existed then render the same, byte for byte (K30).
+    if spec.get("pull") is False:
+        record["pull"] = False
     permissions = "permissions:\n  actions: write" if spec.get("at") else "permissions: {}"
     runs_on = ", ".join(_string(label) for label in spec["runs_on"])
     minutes = math.ceil(int(spec["timeout"]) / 60) + 10

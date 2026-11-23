@@ -35,7 +35,15 @@ class Scheduling(Sandbox):
         self.env["PATH"] = os.pathsep.join([str(SUPPORT / "fake_gh"), str(SUPPORT / "fake_launchctl"), self.env["PATH"]])
         self.env.update({"FAKE_GH_STATE": str(self.gh_state), "FAKE_GH_FIXTURES": str(FIXTURES / "github"), "FAKE_LAUNCHCTL_STATE": str(self.lc_state), "CLAUDE_SKILL_TEST_NOW": str(NOW)})
         git(self.project, "remote", "add", "origin", f"https://github.com/{REPO}.git")
-        self.world({"auth": "ok", "repos": {REPO: {"private": True, "default_branch": "main", "files": {}, "workflows": {}, "runners": [{"name": "mac", "status": "online"}]}}})
+        # GitHub's copy of the repository: a bare one under gh/, which every github.com URL is rewritten to for the CLI's git, so fetching never leaves this machine; the fake gh commits there what the Contents API writes.
+        self.github = self.root / "gh"
+        self.origin = self.github / f"{REPO}.git"
+        self.origin.parent.mkdir(parents=True)
+        git(self.root, "clone", "-q", "--bare", str(self.project), str(self.origin))
+        (self.root / "gitconfig").write_text(f'[url "{self.github}/"]\n\tinsteadOf = https://github.com/\n\tinsteadOf = git@github.com:\n')
+        self.env["GIT_CONFIG_GLOBAL"] = str(self.root / "gitconfig")
+        git(self.project, "fetch", "-q", str(self.origin), "main:refs/remotes/origin/main")
+        self.world({"auth": "ok", "repos": {REPO: {"private": True, "default_branch": "main", "files": {}, "workflows": {}, "runners": [{"name": "mac", "status": "online"}], "git": str(self.origin)}}})
 
     def world(self, data=None, **change):
         path = self.gh_state / "world.json"
@@ -209,6 +217,21 @@ class Schedule(Scheduling):
         self.assertEqual(again["workflow"]["status"], "unchanged")
         self.assertEqual(json.loads(self.committed().splitlines()[1][len("# spec: "):])["definition"], spec["definition"])
 
+    def test_no_pull_is_recorded_and_kept_until_pull(self):
+        reply = self.new("--no-pull")
+        self.assertIs(reply["settings"]["pull"], False)
+        self.assertIs(self.spec_of()["pull"], False)
+        self.assertEqual(self.committed().count(" --no-pull"), 2, "both steps: Run tells the worker, Finish leaves the checkout")
+        self.assertEqual(self.schedule()["workflow"]["status"], "unchanged")
+        self.assertEqual(self.schedule("--pull")["workflow"]["status"], "committed")
+        self.assertNotIn("pull", self.spec_of(), "on is the default and is not written, so workflows committed before it stay byte for byte")
+        self.assertNotIn("--no-pull", self.committed())
+        self.assertIs(self.schedule()["settings"]["pull"], True)
+
+    def test_pull_and_no_pull_together_are_refused(self):
+        reply = self.new("--pull", "--no-pull", expect=2)
+        self.assertIn("not allowed with", reply["error"])
+
     def test_an_empty_stdin_does_not_touch_the_prompt(self):
         self.new()
         before = self.committed()
@@ -330,6 +353,81 @@ class Schedule(Scheduling):
         self.assertEqual([p["problem"] for p in self.new("--dry-run")["runner"]["problems"]], ["path_missing"])
         self.world(repos={REPO: {**self.repo(), "runners": []}})
         self.assertEqual([p["problem"] for p in self.new("--dry-run")["runner"]["problems"]], ["none"])
+
+
+class Local(Scheduling):
+    """K30: what `schedule` and `unschedule` commit on GitHub is brought into the checkout right after, by the rules a run's end follows."""
+
+    def head(self, ref="HEAD"):
+        return git(self.project, "rev-parse", ref)
+
+    def github_head(self):
+        return git(self.origin, "rev-parse", "main")
+
+    def land(self, rel, text):
+        """A commit on GitHub made some other way, as one the checkout has not taken in yet; its sha."""
+        work = self.root / "elsewhere"
+        if not work.exists():
+            git(self.root, "clone", "-q", str(self.origin), str(work))
+        git(work, "pull", "-q", "--ff-only")
+        (work / rel).write_text(text)
+        git(work, "add", rel)
+        git(work, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "-m", "elsewhere")
+        git(work, "push", "-q", "origin", "HEAD")
+        return git(work, "rev-parse", "HEAD")
+
+    def test_the_committed_workflow_is_in_the_checkout(self):
+        reply = self.new()
+        local = reply["local"]
+        self.assertEqual((local["status"], local["branch"], local["contains_commit"]), ("updated", "main", True))
+        self.assertEqual(reply["workflow"]["commit"], self.github_head())
+        self.assertEqual(self.head(), self.github_head())
+        self.assertEqual((self.project / ".github" / "workflows" / "nightly.yml").read_text(), self.committed())
+
+    def test_an_unchanged_call_brings_in_what_an_earlier_one_could_not(self):
+        self.new()
+        sha = self.land("theirs.md", "t\n")
+        reply = self.schedule()
+        self.assertEqual(reply["workflow"]["status"], "unchanged")
+        self.assertEqual(reply["local"]["status"], "updated")
+        self.assertNotIn("contains_commit", reply["local"], "nothing was committed this time")
+        self.assertEqual(self.head(), sha)
+
+    def test_a_dry_run_or_a_listing_does_not_touch_it(self):
+        self.land("theirs.md", "t\n")
+        before = self.head()
+        self.assertNotIn("local", self.new("--dry-run"))
+        self.assertNotIn("local", self.cli_json("schedule", "--list"))
+        self.assertEqual(self.head(), before)
+
+    def test_an_update_left_undone_is_said_and_is_not_a_failure(self):
+        mine = self.project / ".github" / "workflows" / "nightly.yml"
+        mine.parent.mkdir(parents=True)
+        mine.write_text("mine\n")
+        before = self.head()
+        reply = self.new()
+        self.assertEqual(reply["workflow"]["status"], "committed")
+        local = reply["local"]
+        self.assertEqual((local["status"], local["files"], local["contains_commit"]), ("not_updated", [".github/workflows/nightly.yml"], False))
+        self.assertIn("merge --ff-only --no-overwrite-ignore origin/main", local["instead"])
+        self.assertEqual(self.head(), before)
+        self.assertEqual(mine.read_text(), "mine\n")
+
+    def test_unschedule_brings_in_the_deletion(self):
+        self.new()
+        reply = self.cli_json("unschedule", "--name", "nightly")
+        self.assertEqual((reply["workflow"]["status"], reply["local"]["status"], reply["local"]["contains_commit"]), ("deleted", "updated", True))
+        self.assertFalse((self.project / ".github" / "workflows" / "nightly.yml").exists())
+        self.assertEqual(self.head(), self.github_head())
+
+    def test_a_run_working_in_the_checkout_holds_it(self):
+        busy = self.cli_json("start", "x [[fake:sleep:60]]", "--profile", "write")
+        before = self.head()
+        reply = self.new()
+        self.assertEqual(reply["local"]["status"], "not_updated")
+        self.assertIn(busy["run_id"], reply["local"]["reason"])
+        self.assertEqual(self.head(), before)
+        self.cli("stop", "--run", busy["run_id"])
 
 
 class Refusals(Scheduling):

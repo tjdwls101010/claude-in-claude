@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+What a schedule leaves on GitHub reaches the checkout on this Mac.
+
+### Added
+
+- When a scheduled run ends — completed, failed, timed out or cancelled — its Finish step fast-forwards the default branch of the project checkout to what GitHub holds, so a pull request the worker merged there is on this Mac too. The files move when that branch is checked out; otherwise only the branch does. Nothing of yours is gone over: a file you changed that the incoming commits change, an untracked or ignored file they would replace, a commit only here, a merge or rebase in progress, a run working in the checkout itself, or an origin that is another repository leaves it as it is, and the summary's warning says why and what to run. Repository hooks do not run, and git uses your own login rather than the job's token.
+- The summary has a **Local checkout** row and a **From GitHub** list of the commits that came in.
+- `schedule --no-pull` turns this off for a schedule (`--pull` turns it back on). It is on by default, also for schedules committed before it: their workflow files do not change.
+- `schedule` and `unschedule` bring the checkout up the same way right after their commit; the reply's `local` says how it went (`contains_commit` when they committed), and calling again completes an update left undone.
+- A scheduled worker is told that the job updates the checkout after it, so it does not try to pull from its worktree.
+
+### Changed
+
+- `remote_url` reads the remote's URL as configured, before `url.*.insteadOf` rewriting: a rewrite to a mirror no longer makes `schedule` and `doctor` miss the GitHub repository.
+- A worktree run's summary says "the worker did not touch your checkout" instead of "your checkout is not touched", since the job now may.
+
 ## [0.3.0] — 2026-11-22
 
 A schedule's name is the person's: used as given for its workflow file and its title in Actions.

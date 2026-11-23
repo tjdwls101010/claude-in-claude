@@ -24,7 +24,7 @@ OLD_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,23}")
 GROUP_CHARS = 40
 UNSEEN = {"Cc": "a control character", "Zl": "a line separator", "Zp": "a paragraph separator", "Zs": "a space other than the ordinary one", "Cf": "a formatting character that does not show", "Cs": "half of a surrogate pair", "Co": "a private-use character"}
 LABEL_RULE = re.compile(r"^[A-Za-z0-9._-]+$")
-SCHEDULE_DEFAULTS = {"model": DEFAULTS["model"], "effort": DEFAULTS["effort"], "timeout": 3600, "worktree": False, "runs_on": ["self-hosted"]}
+SCHEDULE_DEFAULTS = {"model": DEFAULTS["model"], "effort": DEFAULTS["effort"], "timeout": 3600, "worktree": False, "pull": True, "runs_on": ["self-hosted"]}
 AT_FORMAT = "%Y-%m-%dT%H:%M"
 AT_RULE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$")
 
@@ -113,16 +113,17 @@ def fields_of(spec):
 
 
 def merge(flags, recorded, *, timezone, project, cli, now, keep_definition=False):
-    """The spec to commit. `flags` holds what the command line gave (None for absent): name, prompt, schema (its text), cron, at, profile, model, effort, timeout, worktree (True, False or None), runs_on. `recorded` is the committed workflow's spec, or None for a new schedule, which then needs a prompt, a profile and a time. The time zone, project and skill path always come from now, so calling `schedule --name X` again refreshes paths that moved (K3). A fresh `definition` is drawn unless `keep_definition` (K8)."""
+    """The spec to commit. `flags` holds what the command line gave (None for absent): name, prompt, schema (its text), cron, at, profile, model, effort, timeout, worktree and pull (True, False or None), runs_on. `recorded` is the committed workflow's spec, or None for a new schedule, which then needs a prompt, a profile and a time. The time zone, project and skill path always come from now, so calling `schedule --name X` again refreshes paths that moved (K3). A fresh `definition` is drawn unless `keep_definition` (K8)."""
     base = {**SCHEDULE_DEFAULTS, "prompt": None, "schema": None, "cron": None, "at": None, "profile": None}
     if recorded:
-        base.update({k: v for k, v in recorded.items() if k in ("prompt", "schema", "cron", "at", "profile", "model", "effort", "timeout", "worktree", "runs_on")})
+        base.update({k: v for k, v in recorded.items() if k in ("prompt", "schema", "cron", "at", "profile", "model", "effort", "timeout", "worktree", "pull", "runs_on")})
     spec = dict(base)
     for key in ("prompt", "schema", "profile", "model", "effort", "timeout", "runs_on"):
         if flags.get(key) is not None:
             spec[key] = flags[key]
-    if flags.get("worktree") is not None:
-        spec["worktree"] = flags["worktree"]
+    for key in ("worktree", "pull"):
+        if flags.get(key) is not None:
+            spec[key] = flags[key]
     if flags.get("cron"):
         spec.update({"cron": flags["cron"], "at": None})
     if flags.get("at"):

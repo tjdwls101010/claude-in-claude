@@ -1,6 +1,6 @@
 """S5 for schedules: `schedule` and `unschedule` against real GitHub, a real self-hosted runner and real launchd, with workers on the real `claude` (haiku). Skipped unless CLAUDE_SKILL_REAL=1 and CLAUDE_SKILL_REAL_GITHUB=1.
 
-Needs CLAUDE_SKILL_REAL_SCHEDULE_PROJECT: a checkout of a PRIVATE repository whose self-hosted runner runs as a service on this Mac and can read the Claude login (its `schedule` reply lists no `runner.problems`). The test commits workflow files to that repository's default branch, installs LaunchAgents on this Mac, starts real jobs and workers, and removes its schedules again at the end (also when it fails). It takes about 15 minutes.
+Needs CLAUDE_SKILL_REAL_SCHEDULE_PROJECT: a checkout of a PRIVATE repository whose self-hosted runner runs as a service on this Mac and can read the Claude login (its `schedule` reply lists no `runner.problems`). The test commits workflow files to that repository's default branch, installs LaunchAgents on this Mac, starts real jobs and workers, and removes its schedules again at the end (also when it fails). It takes about 20 minutes. The project checkout must be on its default branch with nothing in the way: the tests check that what lands on GitHub reaches it.
 
 The one-off has the shape of a name a person gives — underscores, a capital, Korean — so the name's whole path is real: the file GitHub registers, the dispatcher launchd fires, the arguments the runner hands the steps, the worktree group and the summary's title.
 
@@ -9,6 +9,7 @@ Run from tests/: CLAUDE_SKILL_REAL=1 CLAUDE_SKILL_REAL_GITHUB=1 CLAUDE_SKILL_REA
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import secrets
@@ -100,6 +101,65 @@ class RealSchedule(unittest.TestCase):
 
     def schedule(self, name, prompt, *flags):
         return self.cli_json("schedule", "--name", name, prompt, *flags)
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.project), *args], capture_output=True, text=True, timeout=120, check=True).stdout.strip()
+
+    def land(self, rel, text, message):
+        """A commit on GitHub's default branch through the Contents API, as a pull request a worker merged leaves one; its sha."""
+        body = json.dumps({"message": message, "content": base64.b64encode(text.encode()).decode()})
+        proc = subprocess.run(["gh", "api", "-X", "PUT", f"repos/{self.repo}/contents/{quote(rel)}", "--input", "-"], input=body, capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)["commit"]["sha"]
+
+    def started(self, name, gh_run):
+        """Wait until the job's worker has started, so what lands next lands while it runs."""
+        end = time.time() + 300
+        while time.time() < end:
+            try:
+                if self.state(name)["jobs"].get(f"{gh_run}-1", {}).get("run_id"):
+                    return
+            except (OSError, ValueError):
+                pass
+            time.sleep(3)
+        self.fail(f"the worker of run {gh_run} did not start")
+
+    def test_what_lands_on_github_reaches_the_checkout(self):
+        # K30, on the real runner: its service must reach GitHub with the person's login (the job's token, which git would otherwise use, cannot read the repository).
+        reply = self.schedule(self.name, "Run the shell command: sleep 60 — then reply with the single word done.", "--cron", "0 4 1 1 *", "--profile", "read-only", "--model", "haiku", "--effort", "low", "--timeout", "600")
+        self.repo = reply["repo"]
+        self.registry = self.project / ".claude-runs"
+        self.assertEqual((reply["local"]["status"], reply["local"]["contains_commit"]), ("updated", True), reply["local"])
+        self.assertTrue((self.project / ".github" / "workflows" / f"{self.name}.yml").exists(), "the committed workflow is in the checkout")
+
+        run = self.dispatch(self.name)
+        self.started(self.name, run)
+        sha = self.land(f"smoke-landed-{self.token}.md", "landed while the run ran\n", f"smoke: landed during {self.name}")
+        self.assertEqual(self.watch(run)["conclusion"], "success")
+        summary, _ = self.run_summary(self.name, run)
+        row = next(l for l in summary.splitlines() if l.startswith("| **Local checkout** |"))
+        self.assertIn("fast-forwarded", row, summary[:1500])
+        self.assertEqual(self.git("rev-parse", "HEAD"), sha)
+        self.assertTrue((self.project / f"smoke-landed-{self.token}.md").exists())
+
+        blocker = self.project / f"smoke-blocked-{self.token}.md"
+        blocker.write_text("mine\n")
+        # Only while it is the test's own untracked file: by the end it is the tracked one GitHub sent, which stays.
+        self.addCleanup(lambda: subprocess.run(["git", "-C", str(self.project), "ls-files", "--error-unmatch", blocker.name], capture_output=True).returncode == 0 or blocker.unlink(missing_ok=True))
+        run = self.dispatch(self.name)
+        self.started(self.name, run)
+        blocked = self.land(blocker.name, "theirs\n", f"smoke: in the way of {self.name}")
+        self.assertEqual(self.watch(run)["conclusion"], "success", "an update left undone does not fail the job")
+        summary, _ = self.run_summary(self.name, run)
+        self.assertIn("Your checkout was not updated from GitHub", summary)
+        self.assertIn(blocker.name, summary)
+        self.assertEqual(blocker.read_text(), "mine\n")
+        self.assertEqual(self.git("rev-parse", "HEAD"), sha)
+
+        blocker.unlink()
+        again = self.cli_json("schedule", "--name", self.name)
+        self.assertEqual((again["workflow"]["status"], again["local"]["status"]), ("unchanged", "updated"), "calling again completes what was left undone")
+        self.assertEqual(self.git("rev-parse", "HEAD"), blocked)
 
     def test_the_whole_life_of_a_schedule(self):
         soon = datetime.now() + timedelta(minutes=3)

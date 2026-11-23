@@ -8,6 +8,7 @@ world.json: {"auth": "ok" | "none" | "noscope", "repos": {"owner/name": {"privat
   protected: a Contents PUT or DELETE gets the 409 a protected branch answered (captured).
   offline: a Contents PUT fails as gh does without a network: a message on stderr, no HTTP status.
   slow: every call first sleeps this many seconds.
+  A repository may carry "git": the path of a bare git repository standing in for GitHub's copy. A Contents PUT or DELETE then also commits the change there, with the request's message, and answers with that commit's sha, so a checkout whose origin is that repository can fetch what the API committed.
 
 An API path is read as gh reads it (Go's net/url; each case captured on a private repository): a `#` starts a fragment that is dropped, the first `?` the query, and every path component and query value is percent-decoded once — so a raw `a#b.yml` names `a` — while an escape that is not two hex digits fails before any request. A Contents GET whose `ref` is not the default branch gets the 404 a missing ref got.
 """
@@ -73,8 +74,34 @@ def sha_of(text):
     return hashlib.sha1(f"blob {len(text.encode())}\0{text}".encode()).hexdigest()
 
 
-def commit_sha():
-    return hashlib.sha1(str(time.time_ns()).encode()).hexdigest()
+def commit_sha(repo=None, fpath=None, text=None, message=None):
+    """The sha a Contents write answers with: a commit made in the repository's `git` stand-in when it has one (`text` None deletes the file), a made-up one otherwise."""
+    bare = (repo or {}).get("git")
+    if not bare:
+        return hashlib.sha1(str(time.time_ns()).encode()).hexdigest()
+    import subprocess
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    work = STATE / "git-work"
+
+    def git(*args):
+        return subprocess.run(["git", "-c", "user.email=github@example.com", "-c", "user.name=GitHub", *args], cwd=work if work.exists() else STATE, env=env, check=True, capture_output=True, text=True).stdout.strip()
+
+    if not work.exists():
+        git("clone", "-q", bare, str(work))
+    git("pull", "-q", "--ff-only")
+    target = work / fpath
+    if text is None:
+        git("rm", "-q", "--ignore-unmatch", fpath)
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+        git("add", fpath)
+    if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=work, env=env).returncode == 0:
+        # A file a test planted only in this world, not in the stand-in: nothing to commit there.
+        return hashlib.sha1(str(time.time_ns()).encode()).hexdigest()
+    git("commit", "-q", "-m", message or "update")
+    git("push", "-q", "origin", "HEAD")
+    return git("rev-parse", "HEAD")
 
 
 args = sys.argv[1:]
@@ -242,7 +269,7 @@ if c:
         if fpath.startswith(".github/workflows/"):
             repo.setdefault("workflows", {}).setdefault(name, "active")
         save()
-        answer("contents-put-update" if cur else "contents-put-create", **{"content.sha": new_sha, "content.path": fpath, "content.name": name, "content.html_url": url, "commit.sha": commit_sha(), "commit.message": body.get("message")})
+        answer("contents-put-update" if cur else "contents-put-create", **{"content.sha": new_sha, "content.path": fpath, "content.name": name, "content.html_url": url, "commit.sha": commit_sha(repo, fpath, text, body.get("message")), "commit.message": body.get("message")})
     if method == "DELETE":
         if cur is None:
             answer("contents-get-404")
@@ -251,7 +278,7 @@ if c:
         del files[fpath]
         repo.get("workflows", {}).pop(name, None)
         save()
-        answer("contents-delete", **{"commit.sha": commit_sha(), "commit.message": body.get("message")})
+        answer("contents-delete", **{"commit.sha": commit_sha(repo, fpath, None, body.get("message")), "commit.message": body.get("message")})
 
 w = re.match(r"^actions/workflows/([^/]+)(?:/(enable|disable))?$", rest)
 if w:

@@ -19,6 +19,35 @@ LATER = SLOT + 2 * 3600 + 47 * 60  # 05:47 the same day
 
 class Job(Sandbox):
     profile = "read-only"
+    REMOTE = "https://github.com/someone/project.git"
+
+    def setUp(self):
+        super().setUp()
+        # GitHub's copy of the project: a bare repository the project's origin is rewritten to, so its URL still names someone/project.
+        self.origin = self.root / "origin.git"
+        git(self.root, "clone", "-q", "--bare", str(self.project), str(self.origin))
+        git(self.project, "remote", "add", "origin", self.REMOTE)
+        git(self.project, "config", f"url.{self.origin}.insteadOf", self.REMOTE)
+        git(self.project, "fetch", "-q", "origin")
+
+    def land(self, files, message="merged on GitHub"):
+        """A commit on GitHub's default branch, as a worker's merged pull request leaves one; its sha."""
+        other = self.root / "elsewhere"
+        if not other.exists():
+            git(self.root, "clone", "-q", str(self.origin), str(other))
+            git(other, "config", "user.email", "t@example.com")
+            git(other, "config", "user.name", "t")
+        git(other, "pull", "-q", "--ff-only")
+        for rel, text in files.items():
+            (other / rel).parent.mkdir(parents=True, exist_ok=True)
+            (other / rel).write_text(text)
+        git(other, "add", "-A")
+        git(other, "commit", "-q", "-m", message)
+        git(other, "push", "-q", "origin", "main")
+        return git(other, "rev-parse", "HEAD")
+
+    def head(self):
+        return git(self.project, "rev-parse", "HEAD")
 
     def job_env(self, run_id="44006368956", attempt=1, event="workflow_dispatch", source="", mode="run", prompt="look around", schema=None, now=LATER, extra=None):
         d = self.root / "job" / f"{run_id}-{attempt}"
@@ -31,10 +60,10 @@ class Job(Sandbox):
         env.update(extra or {})
         return env
 
-    def args(self, step, profile=None, cron="0 3 * * *", at=None, worktree=False, timeout=600, project=None, name="nightly"):
+    def args(self, step, profile=None, cron="0 3 * * *", at=None, worktree=False, timeout=600, project=None, name="nightly", pull=True):
         a = ["__scheduled", step, "--name", name, "--project", str(project or self.project), "--profile", profile or self.profile, "--model", "haiku", "--effort", "low", "--timeout", str(timeout), "--timezone", "Asia/Seoul"]
         a += ["--at", at] if at else ["--cron", cron]
-        return a + (["--worktree"] if worktree else [])
+        return a + (["--worktree"] if worktree else []) + ([] if pull else ["--no-pull"])
 
     def step(self, step, env, **kw):
         return self.cli(*self.args(step, **kw), env=env, timeout=120)
@@ -284,6 +313,16 @@ class Worker(Job):
         (meta,) = self.scheduled_runs()
         self.assertEqual({k: meta["origin"][k] for k in ("name", "trigger", "job")}, {"name": "nightly", "trigger": "manual", "job": "44006368956-1"})
 
+    def test_it_is_told_the_job_updates_the_checkout(self):
+        told = f"When you end, this job tries to fast-forward the default branch of {self.project} from GitHub"
+        self.job(self.job_env(prompt="x"))
+        (call,) = self.worker_calls()
+        self.assertIn(told, call["messages"][0]["message"]["content"])
+        self.setUp()
+        self.job(self.job_env(prompt="x"), pull=False)
+        (call,) = self.worker_calls()
+        self.assertNotIn(told, call["messages"][0]["message"]["content"])
+
     def test_worker_text_cannot_issue_workflow_commands(self):
         run, finish, summary = self.job(self.job_env(prompt="x [[fake:reply:::error::forged]]"))
         lines = run.stdout.splitlines()
@@ -402,6 +441,206 @@ class Trees(Job):
         self.assertEqual(self.worker_calls(), [])
         self.assertIn("needs a commit", summary)
         self.assertNotIn("[!WARNING]", summary, "no group was ever made, so there is nothing to clean or warn about")
+
+
+class LocalCheckout(Job):
+    """K30: what the run left on GitHub's default branch reaches the project's checkout when the job ends, and nothing of the person's is touched to get it there."""
+
+    profile = "write"
+
+    def merged_during(self, env, files, message="merged on GitHub", **kw):
+        """Run, a merge on GitHub while the worker works, then Finish; (run, finish, summary, the merge's sha)."""
+        run = self.step("run", env, **kw)
+        sha = self.land(files, message)
+        finish = self.step("finish", env, **kw)
+        return run, finish, Path(env["GITHUB_STEP_SUMMARY"]).read_text(), sha
+
+    def row(self, summary):
+        return next(l for l in summary.splitlines() if l.startswith("| **Local checkout** |"))
+
+    def test_a_merge_on_github_reaches_the_checkout(self):
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x [[fake:reply:merged]]"), {"report.md": "done\n"}, "docs: the report (#7)", worktree=True)
+        self.assertEqual((run.returncode, finish.returncode), (0, 0), run.stdout + finish.stdout)
+        self.assertEqual(self.head(), sha)
+        self.assertEqual((self.project / "report.md").read_text(), "done\n")
+        self.assertIn("fast-forwarded", self.row(summary))
+        self.assertIn("1 commit from GitHub", self.row(summary))
+        self.assertIn("the report", summary.split("<b>From GitHub</b>", 1)[1])
+        self.assertNotIn("[!WARNING]", summary)
+
+    def test_a_read_only_run_shows_it_too(self):
+        self.profile = "read-only"
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"report.md": "done\n"})
+        self.assertEqual(self.head(), sha)
+        self.assertIn("fast-forwarded", self.row(summary))
+        self.assertNotIn("<b>Changes</b>", summary)
+
+    def test_nothing_new(self):
+        run, finish, summary = self.job(self.job_env(prompt="x"), worktree=True)
+        self.assertIn("already matched GitHub", self.row(summary))
+
+    def test_the_changes_are_the_runs_not_what_came_in(self):
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x [[fake:write:new.txt]]"), {"theirs.md": "t\n"})
+        changes = summary.split("<b>Changes</b>", 1)[1].split("</details>", 1)[0]
+        self.assertIn("new.txt", changes)
+        self.assertNotIn("theirs.md", changes)
+        self.assertNotIn("HEAD moved", changes)
+        self.assertEqual(self.head(), sha)
+        self.assertTrue((self.project / "new.txt").exists())
+
+    def test_a_failed_run_still_brings_in_what_landed(self):
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x [[fake:auth_fail]]"), {"part1.md": "1\n"}, worktree=True)
+        self.assertEqual((run.returncode, finish.returncode), (1, 0))
+        self.assertEqual(self.head(), sha)
+
+    def test_local_edits_are_never_overwritten(self):
+        before = self.head()
+        (self.project / "README.md").write_text("mine\n")
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"README.md": "theirs\n"}, worktree=True)
+        self.assertEqual((run.returncode, finish.returncode), (0, 0))
+        self.assertEqual(self.head(), before)
+        self.assertEqual((self.project / "README.md").read_text(), "mine\n")
+        self.assertIn("not updated", self.row(summary))
+        warning = summary.split("[!WARNING]", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("Your checkout was not updated from GitHub", warning)
+        self.assertIn("`README.md`", warning)
+        self.assertIn("merge --ff-only --no-overwrite-ignore origin/main", warning)
+        self.assertIn("::warning title=nightly%3A checkout not updated::", finish.stdout)
+
+    def test_a_run_working_in_the_checkout_holds_the_update(self):
+        busy = self.cli_json("start", "x [[fake:sleep:60]]", "--profile", "write")
+        before = self.head()
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, worktree=True)
+        self.assertEqual(self.head(), before)
+        warning = summary.split("[!WARNING]", 1)[1]
+        self.assertIn(busy["run_id"], warning)
+        self.assertNotIn("pull", warning.split("To do it yourself", 1)[1].split("\n", 1)[0], "a plain pull would overwrite ignored files (codex review R2-05)")
+        self.cli("stop", "--run", busy["run_id"])
+
+    def test_a_job_without_a_worker_leaves_it(self):
+        before = self.head()
+        self.land({"theirs.md": "t\n"})
+        run, finish, summary = self.job(self.job_env(mode="check"))
+        self.assertEqual(self.head(), before)
+        self.assertNotIn("Local checkout", summary)
+
+    def test_a_checkout_of_another_repository_is_left_alone(self):
+        git(self.project, "remote", "set-url", "origin", "https://github.com/someone/fork.git")
+        git(self.project, "config", f"url.{self.origin}.insteadOf", "https://github.com/someone/fork.git")
+        before = self.head()
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, worktree=True)
+        self.assertEqual(self.head(), before)
+        self.assertIn("someone/fork, not someone/project", summary)
+
+    def test_an_unconfirmed_stop_in_the_checkout_leaves_it(self):
+        env = self.job_env(prompt="x")
+        before = self.head()
+        self.assertEqual(self.step("run", env).returncode, 0)
+        (meta,) = self.scheduled_runs()
+        (self.run_dir(meta["run_id"]) / "meta.json").write_text("{not json")
+        self.land({"theirs.md": "t\n"})
+        finish = self.step("finish", env)
+        self.assertEqual(finish.returncode, 1)
+        self.assertEqual(self.head(), before)
+
+    def test_a_run_in_the_checkout_by_another_spelling_holds_it(self):
+        # Codex review R2-01: this Mac's file system ignores letter case, so `…/PROJECT` is the checkout too.
+        alias = self.project.parent / self.project.name.upper()
+        if not alias.exists():
+            self.skipTest("the file system tells letter case apart")
+        busy = self.cli_json("start", "x [[fake:sleep:60]]", "--profile", "write", "--cwd", str(alias))
+        before = self.head()
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, worktree=True)
+        self.assertEqual(self.head(), before)
+        self.assertIn(busy["run_id"], summary.split("[!WARNING]", 1)[1])
+        self.cli("stop", "--run", busy["run_id"])
+
+    def test_a_run_whose_directory_was_renamed_still_holds_it(self):
+        # Codex review R3-01: the recorded directory is gone, but the worker still works in the checkout.
+        inside = self.project / "inside"
+        inside.mkdir()
+        busy = self.cli_json("start", "x [[fake:sleep:60]]", "--profile", "write", "--cwd", str(inside))
+        inside.rename(self.project / "moved")
+        before = self.head()
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, worktree=True)
+        self.assertEqual(self.head(), before)
+        self.assertIn(busy["run_id"], summary.split("[!WARNING]", 1)[1])
+        self.cli("stop", "--run", busy["run_id"])
+
+    def test_a_run_in_a_worktree_of_its_own_below_the_checkout_does_not_hold_it(self):
+        # Codex review R2-02: git places that run in another checkout, whatever its path looks like.
+        wt = self.project / ".claude" / "worktrees" / "mine"
+        git(self.project, "worktree", "add", "-q", "-b", "mine", str(wt))
+        busy = self.cli_json("start", "x [[fake:sleep:60]]", "--profile", "write", "--cwd", str(wt))
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, worktree=True)
+        self.assertEqual(self.head(), sha, summary)
+        self.cli("stop", "--run", busy["run_id"])
+
+    def test_a_run_whose_finish_has_not_read_its_changes_holds_the_update(self):
+        # Codex review LS07: another job's end between this run's end and its Finish must not slip GitHub's commits into this run's changes.
+        mine = self.job_env(prompt="x [[fake:write:new.txt]]")
+        self.assertEqual(self.step("run", mine).returncode, 0)
+        sha = self.land({"theirs.md": "t\n"})
+        other = self.job_env(run_id="44006368999", prompt="x")
+        before = self.head()
+        self.job(other, worktree=True, name="other")
+        self.assertEqual(self.head(), before, "the other job's end left the checkout alone")
+        self.assertIn("has not read", Path(other["GITHUB_STEP_SUMMARY"]).read_text())
+        self.step("finish", mine)
+        summary = Path(mine["GITHUB_STEP_SUMMARY"]).read_text()
+        changes = summary.split("<b>Changes</b>", 1)[1].split("</details>", 1)[0]
+        self.assertNotIn("theirs.md", changes)
+        self.assertNotIn("HEAD moved", changes)
+        self.assertEqual(self.head(), sha, "its own Finish then brings it in")
+
+    def test_a_commit_message_in_another_encoding_does_not_cost_the_summary(self):
+        # Codex review LS06: a repository's log encoding made git print bytes that are not UTF-8, and Finish ended with no summary.
+        git(self.project, "config", "i18n.logOutputEncoding", "ISO-8859-1")
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, "docs: café", worktree=True)
+        self.assertEqual(finish.returncode, 0, finish.stdout + finish.stderr)
+        self.assertEqual(self.head(), sha)
+        self.assertIn("café", summary.split("<b>From GitHub</b>", 1)[1])
+
+    def plant_old_run(self, run_id, summary):
+        """A scheduled run in the checkout as a version before `changes_read_at` left it on disk, ended a minute ago."""
+        d = self.runs_dir() / run_id
+        d.mkdir(parents=True)
+        (d / "meta.json").write_text(json.dumps({"run_id": run_id, "session_id": "s-" + run_id, "state": "completed", "cwd": str(self.project), "worktree": None, "created_at": time.time() - 120, "ended_at": time.time() - 60, "origin": {"kind": "schedule", "name": "old", "job": "1-1", "pull": True}}))
+        if summary:
+            (d / "summary.md").write_text("# done\n")
+
+    def test_a_run_left_by_an_older_version_is_judged_by_its_summary(self):
+        # Codex review R4-01: a run from before the mark says nothing of it; the summary its Finish left is what tells.
+        self.plant_old_run("20261123-200000-old-done-aaaa", summary=True)
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, worktree=True)
+        self.assertEqual(self.head(), sha, summary)
+        self.setUp()
+        self.plant_old_run("20261123-200000-old-open-bbbb", summary=False)
+        before = self.head()
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, worktree=True)
+        self.assertEqual(self.head(), before)
+        self.assertIn("has not read", summary)
+
+    def test_no_pull_leaves_the_checkout(self):
+        before = self.head()
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, worktree=True, pull=False)
+        self.assertEqual((run.returncode, finish.returncode), (0, 0))
+        self.assertEqual(self.head(), before)
+        self.assertEqual(self.row(summary), "| **Local checkout** | left as it is (`--no-pull`) |")
+        self.assertNotIn("[!WARNING]", summary)
+
+    def test_git_does_not_get_the_jobs_tokens(self):
+        # The ext transport runs a shell command in git's own environment: it records that environment, then serves the repository.
+        seen = self.root / "git-env"
+        git(self.project, "config", "protocol.ext.allow", "always")
+        git(self.project, "config", "--unset", f"url.{self.origin}.insteadOf")
+        git(self.project, "config", f"url.ext::sh -c env% >>{seen};% exec% %S% {self.origin}.insteadOf", self.REMOTE)
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, worktree=True)
+        self.assertEqual(self.head(), sha, summary)
+        env = seen.read_text()
+        for handle in ("GH_TOKEN=", "GITHUB_TOKEN=", "GITHUB_OUTPUT=", "GITHUB_ENV=", "GITHUB_STEP_SUMMARY="):
+            self.assertNotIn("\n" + handle, "\n" + env)
+        self.assertIn("GIT_TERMINAL_PROMPT=0", env)
 
 
 class Names(Job):
