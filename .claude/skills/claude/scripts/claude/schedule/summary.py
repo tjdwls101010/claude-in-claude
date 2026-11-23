@@ -390,6 +390,9 @@ def _changes(snapshot, context):
     if ch.get("landed"):
         l = ch["landed"]
         body.append(f"The worktree went: {went_text(l)}.")
+    elif ch.get("kept") and ch["kept"].get("landed") and ch["kept"].get("why"):
+        k = ch["kept"]
+        body.append(f"The worktree {code_span(k['path'])} is kept: its work is on GitHub ({k['landed']}), but {k['why']}. Move what you need into your tree, then `{k['clean']}`.")
     elif ch.get("kept") and ch["kept"].get("open_pr"):
         k = ch["kept"]
         body.append(f"The worktree {code_span(k['path'])} is kept: its pull request #{k['open_pr']} is still open. A later run's end removes it once that is merged.")
@@ -510,7 +513,13 @@ def _continue(snapshot, context):
     meta = snapshot["meta"]
     c = context["continue"]
     cwd = (meta.get("init") or {}).get("cwd") or meta.get("cwd")
-    code = "\n".join([
+    went = (context.get("changes") or {}).get("landed")
+    lines = []
+    if went:
+        # The session ran in a worktree that is gone now: it comes back at the commit the work landed as, with what was left in it when there was anything.
+        back = ((went.get("leftovers") or {}).get("commit") or went.get("head") or "")[:12]
+        lines += ["# its worktree was removed; bring it back first", f'git -C "{c["project"]}" worktree add "{cwd}" {back}']
+    code = "\n".join(lines + [
         "# ask the same session a follow-up (it remembers this run)",
         f'uv run "{c["cli"]}" resume {meta["run_id"]} "…" --project "{c["project"]}"',
         "# or open the session yourself",

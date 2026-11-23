@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 
 from claude.errors import Refusal
-from claude.git import branch_tip, commits_beyond, current_branch, delete_branch, detached_commits, head_commit, leftovers, preserve_leftovers, prune_worktree, unlock_and_remove
+from claude.git import branch_created, branch_tip, commits_beyond, current_branch, delete_branch, detached_commits, head_commit, last_changed, leftovers, preserve_leftovers, prune_worktree, unlock_and_remove
 from claude.registry import find_run, group_view, is_live, iter_runs, live_runs, read_meta, reap, registry_args, release_group, session_lock
 from claude.util import invocation, pid_alive, process_command
 
@@ -36,7 +36,7 @@ def spawning(manifest):
     return "cli.py" in command and " batch" in command
 
 
-def clean(*, runs_dir, name, force=False, landed=None):
+def clean(*, runs_dir, name, force=False, landed=None, untouched_since=None):
     manifest = group_view(runs_dir, name)
     members = manifest.get("members") or []
     if spawning(manifest):
@@ -57,9 +57,9 @@ def clean(*, runs_dir, name, force=False, landed=None):
         if m.get("session_id"):
             # Under the member's session lock no resume can publish a run between the liveness check and the removal (J17).
             with session_lock(runs_dir, m["session_id"]):
-                clean_member(runs_dir, m, wt, others, force, removed, kept, group=name, landed=landed)
+                clean_member(runs_dir, m, wt, others, force, removed, kept, group=name, landed=landed, untouched_since=untouched_since)
         else:
-            clean_member(runs_dir, m, wt, others, force, removed, kept, group=name, landed=landed)
+            clean_member(runs_dir, m, wt, others, force, removed, kept, group=name, landed=landed, untouched_since=untouched_since)
     released = not kept
     if released:
         release_group(runs_dir, name)
@@ -76,8 +76,8 @@ def inside(path, root):
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
-def clean_member(runs_dir, m, wt, others, force, removed, kept, group=None, landed=None):
-    """Remove one member's worktree and branch if that loses nothing, appending to `removed` or `kept`. With `landed` (see the module docstring), a member whose commits GitHub holds goes too, after what it left is kept in git."""
+def clean_member(runs_dir, m, wt, others, force, removed, kept, group=None, landed=None, untouched_since=None):
+    """Remove one member's worktree and branch if that loses nothing, appending to `removed` or `kept`. With `landed` (see the module docstring), a member whose commits GitHub holds goes too, after what it left is kept in git. With `untouched_since`, a worktree that changed after that time is kept: someone may be working in it."""
     path = Path(wt["path"])
     entry = {"index": m["index"], "path": str(path), "branch": wt["branch"]}
     for meta in member_runs(runs_dir, m):
@@ -89,6 +89,11 @@ def clean_member(runs_dir, m, wt, others, force, removed, kept, group=None, land
         kept.append({**entry, "reason": "a live run outside the group works in it", "occupied_by": [{"run_id": r, "stop": invocation("stop", "--run", r, *registry_args(runs_dir))} for r in occupied]})
         return
     evidence, head, checked_out, saved = None, None, None, None
+    if path.exists() and untouched_since is not None:
+        changed = last_changed(str(path))
+        if changed is None or changed > untouched_since:
+            kept.append({**entry, "reason": "it changed after its run ended, so someone may be working in it"})
+            return
     if path.exists():
         head = head_commit(str(path))
         checked_out = current_branch(str(path))
@@ -118,7 +123,7 @@ def clean_member(runs_dir, m, wt, others, force, removed, kept, group=None, land
         if evidence and (left["tracked"] or left["untracked"] or left["ignored"]):
             saved = preserve_leftovers(str(path), f"refs/claude/leftovers/{group}-{m['index']}", wt.get("repo") or wt.get("main"), artifacts)
             if saved.get("kept_because"):
-                kept.append({**entry, "reason": f"its work is on GitHub ({evidence['label']}), but what is left in it cannot be kept in git: {saved['kept_because']}", "instead": "move what you need into your tree, or clean --force to discard it"})
+                kept.append({**entry, "reason": f"its work is on GitHub ({evidence['label']}), but what is left in it cannot be kept in git: {saved['kept_because']}", "landed": evidence["label"], "why": saved["kept_because"], "instead": "move what you need into your tree, or clean --force to discard it"})
                 return
         elif not force and (left["tracked"] or left["untracked"] or left["ignored"]):
             reasons = []
@@ -138,13 +143,17 @@ def clean_member(runs_dir, m, wt, others, force, removed, kept, group=None, land
         # The directory was deleted by hand; git still records the worktree and would refuse to delete its branch.
         prune_worktree(wt["repo"], path)
     if evidence:
-        # Its commits are on GitHub: a branch that points at them, or holds nothing beyond the base, loses nothing.
+        # Its commits are on GitHub: the member's own branch, and a branch the run made and left at that commit, lose nothing. A branch that was there before the run — a person's, or the default branch — stays.
+        started = (first or {}).get("created_at") or 0
         deleted = []
         for b in dict.fromkeys(x for x in (wt["branch"], checked_out) if x):
-            if branch_tip(wt["repo"], b) == head or commits_beyond(wt["repo"], b, wt["base"]) == 0:
+            if b == evidence.get("default"):
+                continue
+            made_by_run = b == wt["branch"] or ((branch_created(wt["repo"], b) or 0) >= int(started) > 0)
+            if made_by_run and (branch_tip(wt["repo"], b) == head or commits_beyond(wt["repo"], b, wt["base"]) == 0):
                 if delete_branch(wt["repo"], b)[0]:
                     deleted.append(b)
-        out = {**entry, "landed": evidence["label"], "branch_deleted": wt["branch"] in deleted, "branches_deleted": deleted, **({"pr": evidence["pr"]} if evidence.get("pr") else {})}
+        out = {**entry, "landed": evidence["label"], "head": head, "branch_deleted": wt["branch"] in deleted, "branches_deleted": deleted, **({"pr": evidence["pr"]} if evidence.get("pr") else {})}
         if saved and saved.get("commit"):
             out["leftovers"] = {k: saved[k] for k in ("ref", "commit", "index_commit", "counts")}
         removed.append(out)

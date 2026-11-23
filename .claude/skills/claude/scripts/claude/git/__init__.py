@@ -1,5 +1,6 @@
 __all__ = [
     "branch_contains",
+    "branch_created",
     "branch_exists",
     "branch_tip",
     "commits_beyond",
@@ -11,6 +12,7 @@ __all__ = [
     "fingerprint",
     "head_commit",
     "is_worktree",
+    "last_changed",
     "leftovers",
     "main_checkout",
     "numstat",
@@ -27,5 +29,5 @@ __all__ = [
 ]
 
 from .repo import current_branch, head_commit, main_checkout, remote_url, toplevel, uncommitted_count
-from .worktree import branch_exists, branch_tip, commits_beyond, committed_files, delete_branch, detached_commits, fingerprint, is_worktree, leftovers, numstat, preserve_leftovers, prune_worktree, startup_snapshot, status_snapshot, unlock_and_remove, worktree_entries
+from .worktree import branch_created, branch_exists, branch_tip, last_changed, commits_beyond, committed_files, delete_branch, detached_commits, fingerprint, is_worktree, leftovers, numstat, preserve_leftovers, prune_worktree, startup_snapshot, status_snapshot, unlock_and_remove, worktree_entries
 from .sync import branch_contains, contains, sync_default

@@ -331,3 +331,33 @@ class Landed(Worktrees):
                 (kept,) = reply["kept"]
                 self.assertIn("cannot read", kept["reason"])
                 self.assertTrue(self.wt("pr-1").exists())
+
+    # Claude review of PR ②: S1, S3.
+
+    def test_a_branch_that_was_there_before_the_run_stays(self):
+        git(self.project, "branch", "person")
+        head = self.worked()
+        git(self.wt("pr-1"), "switch", "-q", "person")
+        git(self.wt("pr-1"), "merge", "-q", "--ff-only", head)
+        reply, _ = self.clean_landed("pr", {"landed": True, "label": "#204", "default": "main"})
+        (removed,) = reply["removed"]
+        self.assertNotIn("person", removed["branches_deleted"])
+        self.assertEqual(git(self.project, "rev-parse", "person"), head)
+
+    def test_the_default_branch_is_never_deleted(self):
+        self.worked()
+        reply, _ = self.clean_landed("pr", {"landed": True, "label": "on docs-x", "default": "docs-x"})
+        (removed,) = reply["removed"]
+        self.assertNotIn("docs-x", removed["branches_deleted"])
+        self.assertTrue(git(self.project, "branch", "--list", "docs-x"))
+
+    def test_a_worktree_changed_after_a_time_is_kept(self):
+        import time
+        self.worked()
+        since = time.time()
+        time.sleep(1.1)
+        (self.wt("pr-1") / "later.txt").write_text("someone is here\n")
+        reply = batch.clean(name="pr", cwd=str(self.project), landed=lambda head: {"landed": True, "label": "#204"}, untouched_since=since)
+        (kept,) = reply["kept"]
+        self.assertIn("changed after", kept["reason"])
+        self.assertTrue(self.wt("pr-1").exists())

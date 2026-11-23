@@ -330,16 +330,20 @@ def _clean_group(group, job, registry, project, warnings, landed=None):
     try:
         if (group_view(registry, group).get("origin") or {}).get("job") != job:
             return {}
+    except Refusal:
+        return {}
+    try:
         result = clean(name=group, cwd=project, runs_dir=registry, landed=landed)
     except Exception as e:  # K20: a cleanup that fails is a warning; the summary must still be written.
         warnings.append(f"The worktree was not cleaned up ({getattr(e, 'message', None) or e}); `{invocation('clean', '--group', group, '--project', project)}` does it.")
         return {}
     finally:
+        # This job's own group only: from now on a later job's Finish may look at it (`_sweep`).
         with contextlib.suppress(Refusal, OSError):
             update_group(registry, group, {"finished_at": now()})
     if result["kept"]:
         k = result["kept"][0]
-        return {"kept": {"path": k["path"], "branch": k["branch"], "clean": invocation("clean", "--group", group, "--project", project), "open_pr": k.get("open_pr")}}
+        return {"kept": {"path": k["path"], "branch": k["branch"], "clean": invocation("clean", "--group", group, "--project", project), "open_pr": k.get("open_pr"), "landed": k.get("landed"), "why": k.get("why")}}
     went = next((r for r in result["removed"] if r.get("landed")), None)
     if went:
         return {"landed": went}
@@ -447,10 +451,10 @@ def _landed(spec, ctx, registry, local):
 
     def landed(head):
         if remote and contains(project, remote, head, env=scrub_job_env(os.environ)):
-            return {"landed": True, "label": f"on {branch}"}
+            return {"landed": True, "label": f"on {branch}", "default": branch}
         found = pull_evidence(repo, head, branch)
         if found["kind"] == "merged":
-            return {"landed": True, "label": f"#{found['number']}", "pr": found["number"]}
+            return {"landed": True, "label": f"#{found['number']}", "pr": found["number"], "default": branch}
         if found["kind"] == "open":
             return {"landed": False, "open_pr": found["number"]}
         return None
@@ -469,10 +473,14 @@ def _sweep(registry, project, repo, landed, own):
             notes.append(f"{len(waiting) - n} earlier worktree group(s) were left for a later run's end to look at.")
             break
         try:
-            result = clean(name=g["name"], cwd=project, runs_dir=registry, landed=landed)
-        except Exception:  # live, starting or unreadable: not this time (K20)
+            # Not one that changed after its own Finish: someone may be working in it, as its summary suggested (`claude --resume` there).
+            result = clean(name=g["name"], cwd=project, runs_dir=registry, landed=landed, untouched_since=g.get("finished_at"))
+            notes += [f"An earlier run's worktree {code_span(r['path'])} went: {went_text(r)}." for r in result["removed"] if r.get("landed")]
+            notes += [f"An earlier run's worktree {code_span(k['path'])} is kept: its work is on GitHub ({k['landed']}), but {k['why']}." for k in result["kept"] if k.get("landed") and k.get("why")]
+        except Refusal:  # live or starting: not this time
             continue
-        notes += [f"An earlier run's worktree {code_span(r['path'])} went: {went_text(r)}." for r in result["removed"] if r.get("landed")]
+        except Exception as e:  # K20: said, not raised
+            notes.append(f"The earlier worktree group {code_span(g['name'])} could not be looked at: {e!r}.")
     return notes
 
 

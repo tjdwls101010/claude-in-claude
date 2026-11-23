@@ -45,7 +45,7 @@ def batch(*, name, task_args, tasks_file, defaults, cwd, use_worktrees=False, ru
     return reply
 
 
-def clean(*, name, cwd, force=False, runs_dir=None, landed=None):
-    """Remove a group's worktrees (see `clean --help`). `landed(head)`, given by a caller that can ask GitHub, says of a member whose worktree has commits whether they are already on GitHub — `{landed: True, label}`, `{landed: False, open_pr}` or None — and a landed member then goes with what it left uncommitted kept in git (see `clean_member`)."""
+def clean(*, name, cwd, force=False, runs_dir=None, landed=None, untouched_since=None):
+    """Remove a group's worktrees (see `clean --help`). `landed(head)`, given by a caller that can ask GitHub, says of a member whose worktree has commits whether they are already on GitHub — `{landed: True, label, default}`, `{landed: False, open_pr}` or None — and a landed member then goes with what it left uncommitted kept in git (see `clean_member`). `untouched_since` (epoch seconds) keeps a worktree that changed after it."""
     refuse_inside_worker()
-    return clean_group(runs_dir=resolve_runs_dir(cwd, runs_dir), name=name, force=force, landed=landed)
+    return clean_group(runs_dir=resolve_runs_dir(cwd, runs_dir), name=name, force=force, landed=landed, untouched_since=untouched_since)

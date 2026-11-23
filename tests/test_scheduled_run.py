@@ -712,6 +712,58 @@ class Cleanup(Job):
         self.assertEqual(self.worktrees(), [])
         self.assertIn(f"An earlier run's worktree `{self.project / '.claude' / 'worktrees' / wt}` went: its work is on GitHub (#205)", summary)
 
+    # Claude review of PR ②: S3, S4, S7 and the summary's way back.
+
+    def open_then_merged(self, after_first=None):
+        """A first job whose pull request is open, `after_first` done to it, the PR merged, then a second job; the second job's summary."""
+        wt = "nightly-44006368956-1-1"
+        self.run_then(self.job_env(prompt=self.WORK), lambda: self.pulls_world([{"number": 205, "head": self.head_of(wt), "state": "open"}]), worktree=True)
+        if after_first:
+            after_first(wt)
+        self.pulls_world([{"number": 205, "head": self.head_of(wt), "state": "closed", "merged": True}])
+        self.profile = "read-only"
+        return self.job(self.job_env(run_id="44006368999", prompt="x"))[2]
+
+    def manifest(self, change):
+        path = next((self.runs_dir() / ".groups").glob("*.json"))
+        m = json.loads(path.read_text())
+        change(m)
+        path.write_text(json.dumps(m))
+
+    def test_a_worktree_someone_worked_in_since_is_left_by_the_sweep(self):
+        def touch(wt):
+            time.sleep(1.1)
+            (self.project / ".claude" / "worktrees" / wt / "mine.txt").write_text("working here\n")
+        self.open_then_merged(touch)
+        self.assertEqual(self.worktrees(), ["nightly-44006368956-1-1"])
+
+    def test_an_unmarked_scheduled_group_is_left_by_the_sweep(self):
+        self.open_then_merged(lambda wt: self.manifest(lambda m: m.pop("finished_at")))
+        self.assertEqual(self.worktrees(), ["nightly-44006368956-1-1"])
+
+    def test_another_repositorys_group_is_left_by_the_sweep(self):
+        self.open_then_merged(lambda wt: self.manifest(lambda m: m["origin"].update(repository="someone/else")))
+        self.assertEqual(self.worktrees(), ["nightly-44006368956-1-1"])
+
+    def test_why_a_landed_worktree_is_kept_is_said(self):
+        wt = "nightly-44006368956-1-1"
+
+        def merged_with_a_repository_inside():
+            inner = self.project / ".claude" / "worktrees" / wt / "inner"
+            inner.mkdir()
+            git(inner, "init", "-q")
+            self.pulls_world([{"number": 204, "head": self.head_of(wt), "state": "closed", "merged": True}])
+
+        run, finish, summary = self.run_then(self.job_env(prompt=self.WORK), merged_with_a_repository_inside, worktree=True)
+        self.assertIn("its work is on GitHub (#204), but inner is a repository of its own", self.changes(summary))
+        self.assertEqual(self.worktrees(), [wt])
+
+    def test_the_way_back_into_a_removed_worktree(self):
+        wt = "nightly-44006368956-1-1"
+        run, finish, summary = self.run_then(self.job_env(prompt=self.WORK), lambda: self.pulls_world([{"number": 204, "head": self.head_of(wt), "state": "closed", "merged": True}]), worktree=True)
+        back = summary.split("<b>Continue on your Mac</b>", 1)[1]
+        self.assertIn(f'worktree add "{self.project / ".claude" / "worktrees" / wt}"', back)
+
     def test_a_group_no_scheduled_finish_marked_is_left_alone(self):
         reply = self.cli_json("batch", "--group", "mine", "--worktree", "--task", self.WORK, timeout=120)
         self.wait_state(reply["runs"][0]["run_id"], timeout=30)
