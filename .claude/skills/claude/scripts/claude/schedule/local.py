@@ -28,9 +28,9 @@ def _works_in(cwd, top, env):
 
 
 def _changes_unread(run_dir, meta):
-    """Whether a scheduled run's Finish has not yet read what it changed. A run started by this version (its origin records `pull`) says so with `changes_read_at`; an older one only by the summary its Finish left beside it."""
-    if "pull" in (meta.get("origin") or {}):
-        return not meta.get("changes_read_at")
+    """Whether a scheduled run's Finish has not yet read what it changed. A run that carries `changes_read_at` (None from its publication until its Finish reads the changes) says so there; one without the key, left by an older version, only by the summary its Finish left beside it."""
+    if "changes_read_at" in meta:
+        return not meta["changes_read_at"]
     return not (Path(run_dir) / "summary.md").exists()
 
 

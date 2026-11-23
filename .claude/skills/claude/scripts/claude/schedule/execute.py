@@ -220,7 +220,14 @@ def scheduled_run(spec, env, write):
         if not spec.get("worktree"):
             held.enter_context(sync_lock(registry))
             update_job(registry, name, job, {"tree_before": status_snapshot(project)})
-        run_id, refused = _start_worker(spec, prompt, schema_path, registry, group, origin, on_published=lambda meta: held.close())
+        def published(meta):
+            # The run now holds updates off itself, until its Finish marks its changes read (K30).
+            if not spec.get("worktree"):
+                with contextlib.suppress(Refusal, OSError):
+                    update_meta(str(Path(registry) / meta["run_id"]), lambda m: m.setdefault("changes_read_at", None))
+            held.close()
+
+        run_id, refused = _start_worker(spec, prompt, schema_path, registry, group, origin, on_published=published)
     except Refusal as e:
         run_id, refused = None, e.message
     finally:

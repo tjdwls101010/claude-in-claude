@@ -601,6 +601,26 @@ class LocalCheckout(Job):
         self.assertEqual(self.head(), sha)
         self.assertIn("café", summary.split("<b>From GitHub</b>", 1)[1])
 
+    def plant_old_run(self, run_id, summary):
+        """A scheduled run in the checkout as a version before `changes_read_at` left it on disk, ended a minute ago."""
+        d = self.runs_dir() / run_id
+        d.mkdir(parents=True)
+        (d / "meta.json").write_text(json.dumps({"run_id": run_id, "session_id": "s-" + run_id, "state": "completed", "cwd": str(self.project), "worktree": None, "created_at": time.time() - 120, "ended_at": time.time() - 60, "origin": {"kind": "schedule", "name": "old", "job": "1-1", "pull": True}}))
+        if summary:
+            (d / "summary.md").write_text("# done\n")
+
+    def test_a_run_left_by_an_older_version_is_judged_by_its_summary(self):
+        # Codex review R4-01: a run from before the mark says nothing of it; the summary its Finish left is what tells.
+        self.plant_old_run("20261123-200000-old-done-aaaa", summary=True)
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, worktree=True)
+        self.assertEqual(self.head(), sha, summary)
+        self.setUp()
+        self.plant_old_run("20261123-200000-old-open-bbbb", summary=False)
+        before = self.head()
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, worktree=True)
+        self.assertEqual(self.head(), before)
+        self.assertIn("has not read", summary)
+
     def test_no_pull_leaves_the_checkout(self):
         before = self.head()
         run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, worktree=True, pull=False)
