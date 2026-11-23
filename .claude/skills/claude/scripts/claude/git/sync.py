@@ -107,6 +107,14 @@ def _ahead_reason(top, local, remote, branch, env):
     return f"local {branch} has {mine} commit{'s' if mine != 1 else ''} origin does not have"
 
 
+def branch_contains(path, branch, commit, env=None):
+    """Whether the local `branch` of the repository at `path` holds `commit` (False when either is unknown here)."""
+    if not branch or not commit:
+        return False
+    code, _, _ = run_git(path, "merge-base", "--is-ancestor", commit, f"refs/heads/{branch}", env=env)
+    return code == 0
+
+
 def sync_default(checkout, *, fetch_only=False, env=None):
     """Bring the default branch of the checkout at `checkout` up to origin's, as far as that changes nothing of the person's. Never raises.
 
