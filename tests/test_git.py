@@ -195,6 +195,15 @@ class Leftovers(unittest.TestCase):
         saved = self.preserve()
         self.assertIn("100 MiB", saved["kept_because"])
 
+    def test_a_file_that_cannot_be_read_is_left_where_it_is(self):
+        # Codex review of PR ②: an unreadable file made the whole Finish fail with no summary.
+        (self.wt / "build").mkdir()
+        (self.wt / "build" / "locked").write_text("x\n")
+        os.chmod(self.wt / "build", 0o000)
+        self.addCleanup(os.chmod, self.wt / "build", 0o755)
+        saved = self.preserve()
+        self.assertIn("kept_because", saved)
+
     def test_an_unresolved_conflict_is_left_where_it_is(self):
         git(self.wt, "switch", "-q", "-c", "x")
         (self.wt / "a.txt").write_text("x\n")

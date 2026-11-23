@@ -113,7 +113,7 @@ def clean_member(runs_dir, m, wt, others, force, removed, kept, group=None, land
         artifacts = (first or {}).get("startup_artifacts") or {}
         left = leftovers(path, wt.get("repo") or wt.get("main"), artifacts)
         if left is None:
-            kept.append({**entry, "reason": "git does not see a work tree there"})
+            kept.append({**entry, "reason": "git cannot read all of it (or does not see a work tree there), so what it holds is not known"})
             return
         if evidence and (left["tracked"] or left["untracked"] or left["ignored"]):
             saved = preserve_leftovers(str(path), f"refs/claude/leftovers/{group}-{m['index']}", wt.get("repo") or wt.get("main"), artifacts)

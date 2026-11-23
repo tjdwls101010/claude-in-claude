@@ -11,7 +11,9 @@ from support.harness import FAST_TIMINGS, Sandbox, engine, git
 batch = engine("claude.batch")
 
 
-class Clean(Sandbox):
+class Worktrees(Sandbox):
+    """A project with a .worktreeinclude secret, and helpers to start worktree members and clean them."""
+
     def setUp(self):
         super().setUp()
         (self.project / ".gitignore").write_text(".env\nbuild/\n")
@@ -36,6 +38,8 @@ class Clean(Sandbox):
     def clean(self, name, *args, expect=0):
         return self.cli_json("clean", "--group", name, *args, expect=expect, timeout=120)
 
+
+class Clean(Worktrees):
     def test_untouched_worktree_goes_without_force(self):
         reply = self.batch("ok", "look only [[fake:ccwrites]]")
         self.assertTrue((self.wt("ok-1") / ".claude" / "histories").is_symlink())
@@ -255,7 +259,7 @@ class ReviewFindings(Sandbox):
         self.assertEqual(call["cwd"], str(other))
 
 
-class Landed(Clean):
+class Landed(Worktrees):
     """`clean` given `landed`, as a schedule's Finish gives it (K30): a member whose commits GitHub already holds goes, what it left uncommitted kept in git, and its branches with it; one whose pull request is open stays."""
 
     def worked(self, name="pr"):
@@ -312,3 +316,18 @@ class Landed(Clean):
         reply, asked = self.clean_landed("ro", {"landed": True, "label": "#1"})
         self.assertEqual(asked, [])
         self.assertTrue(reply["name_released"])
+
+    def test_a_directory_git_cannot_read_keeps_it(self):
+        # git only warns about a directory it cannot open; what is in it is unknown, so nothing may be removed.
+        self.worked()
+        hidden = self.wt("pr-1") / "hidden"
+        hidden.mkdir()
+        (hidden / "mine.txt").write_text("mine\n")
+        os.chmod(hidden, 0o000)
+        self.addCleanup(os.chmod, hidden, 0o755)
+        for answer in ({"landed": True, "label": "#204"}, None):
+            with self.subTest(answer=answer):
+                reply, _ = self.clean_landed("pr", answer)
+                (kept,) = reply["kept"]
+                self.assertIn("cannot read", kept["reason"])
+                self.assertTrue(self.wt("pr-1").exists())

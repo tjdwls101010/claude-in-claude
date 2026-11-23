@@ -57,10 +57,11 @@ def fingerprint(path):
 
 
 def status_entries(path):
-    """(two-letter status, path) for every changed, untracked and ignored entry in the checkout at `path`, untracked and ignored listed file by file. None outside a work tree."""
+    """(two-letter status, path) for every changed, untracked and ignored entry in the checkout at `path`, untracked and ignored listed file by file. None outside a work tree, or when git could not read a directory in it (so what it holds is not known)."""
     # traditional, unlike matching, lists the files inside an ignored directory one by one when untracked files are listed in full.
-    code, out, _ = run_git(path, "status", "--porcelain=v1", "-z", "--ignored=traditional", "--untracked-files=all")
-    if code != 0:
+    code, out, err = run_git(path, "status", "--porcelain=v1", "-z", "--ignored=traditional", "--untracked-files=all")
+    # git skips a directory it cannot read with only a warning; what it holds is then unknown, not absent.
+    if code != 0 or "could not open directory" in err:
         return None
     entries = []
     parts = out.split("\0")
@@ -240,9 +241,16 @@ def _size(path):
 
 def preserve_leftovers(worktree, ref, main, artifacts):
     """Keep what the worktree at `worktree` holds beyond its commit — as `leftovers` counts it, so neither `.worktreeinclude` copies (which can be secrets) nor unchanged startup artifacts — as two commits under `ref` in its repository, so the worktree can be removed without losing it: `index_commit` (the index, its parent HEAD) and `commit` (every changed, untracked and ignored file as it is on disk, its parent `index_commit`); `git worktree add <path> <commit>` brings the files back. Returns `{ref, commit, index_commit, counts: {tracked, untracked, ignored}, bytes}`, with `commit` None when there is nothing to keep, or `{kept_because}` when it cannot be kept whole: an unresolved conflict, a repository of its own inside, a submodule with changes, ignored files over LEFTOVER_IGNORED_BYTES, or a step git refused. Nothing is changed in the worktree."""
+    try:
+        return _preserve(worktree, ref, main, artifacts)
+    except OSError as e:
+        return {"kept_because": f"it could not be read whole ({e})"}
+
+
+def _preserve(worktree, ref, main, artifacts):
     left = leftovers(worktree, main, artifacts)
     if left is None:
-        return {"kept_because": "git does not see a work tree there"}
+        return {"kept_because": "git cannot read all of it, so what it holds is not known"}
     counts = {k: len(v) for k, v in left.items()}
     if not any(counts.values()):
         return {"ref": ref, "commit": None, "index_commit": None, "counts": counts, "bytes": 0}

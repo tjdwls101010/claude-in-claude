@@ -331,8 +331,8 @@ def _clean_group(group, job, registry, project, warnings, landed=None):
         if (group_view(registry, group).get("origin") or {}).get("job") != job:
             return {}
         result = clean(name=group, cwd=project, runs_dir=registry, landed=landed)
-    except Refusal as e:
-        warnings.append(f"The worktree was not cleaned up ({e.message}); `{invocation('clean', '--group', group, '--project', project)}` does it.")
+    except Exception as e:  # K20: a cleanup that fails is a warning; the summary must still be written.
+        warnings.append(f"The worktree was not cleaned up ({getattr(e, 'message', None) or e}); `{invocation('clean', '--group', group, '--project', project)}` does it.")
         return {}
     finally:
         with contextlib.suppress(Refusal, OSError):
