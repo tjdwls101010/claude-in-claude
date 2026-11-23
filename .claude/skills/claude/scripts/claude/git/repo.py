@@ -8,10 +8,10 @@ import subprocess
 from claude.util import nfc
 
 
-def run_git(cwd, *args, timeout=30):
-    """(returncode, stdout, stderr) of `git -C cwd args…`; a missing git or directory is a failure, not an exception."""
+def run_git(cwd, *args, timeout=30, env=None):
+    """(returncode, stdout, stderr) of `git -C cwd args…`, in `env` when given (this process's environment otherwise); a missing git or directory is a failure, not an exception."""
     try:
-        proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=timeout, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         return 1, "", str(e)
     return proc.returncode, proc.stdout, proc.stderr
