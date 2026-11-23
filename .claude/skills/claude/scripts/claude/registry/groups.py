@@ -62,6 +62,17 @@ def record_member(runs_dir, name, index, fields):
         return manifest
 
 
+def update_group(runs_dir, name, fields):
+    """Add `fields` to a group's manifest, under its lock; None when the group is gone."""
+    with _lock(runs_dir, name):
+        manifest = read_json(_path(runs_dir, name))
+        if manifest is None:
+            return None
+        manifest.update(fields)
+        write_json(_path(runs_dir, name), manifest)
+        return manifest
+
+
 def group_view(runs_dir, name):
     """A group's manifest; Refusal when there is none or it does not parse."""
     try:

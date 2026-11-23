@@ -643,6 +643,92 @@ class LocalCheckout(Job):
         self.assertIn("GIT_TERMINAL_PROMPT=0", env)
 
 
+class Cleanup(Job):
+    """K30: a worktree whose commits GitHub already holds goes when its job — or a later one — ends; what it left uncommitted is kept in git; one whose pull request is open stays."""
+
+    profile = "write"
+    WORK = "x [[fake:write:notes.md]] [[fake:commit:work]] [[fake:write_after:scratch.txt]] [[fake:branch:docs-x]]"
+
+    def setUp(self):
+        super().setUp()
+        self.pulls_world([])
+
+    def pulls_world(self, pulls):
+        state = Path(self.env["FAKE_GH_STATE"])
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "world.json").write_text(json.dumps({"auth": "ok", "repos": {"someone/project": {"private": True, "default_branch": "main", "files": {}, "workflows": {}, "pulls": pulls}}}))
+
+    def worktrees(self):
+        d = self.project / ".claude" / "worktrees"
+        return sorted(p.name for p in d.iterdir()) if d.exists() else []
+
+    def head_of(self, name):
+        return git(self.project / ".claude" / "worktrees" / name, "rev-parse", "HEAD")
+
+    def run_then(self, env, before_finish=None, **kw):
+        run = self.step("run", env, **kw)
+        if before_finish:
+            before_finish()
+        finish = self.step("finish", env, **kw)
+        return run, finish, Path(env["GITHUB_STEP_SUMMARY"]).read_text()
+
+    def changes(self, summary):
+        return summary.split("<b>Changes</b>", 1)[1].split("</details>", 1)[0]
+
+    def test_a_worktree_whose_pull_request_merged_goes(self):
+        wt = "nightly-44006368956-1-1"
+        run, finish, summary = self.run_then(self.job_env(prompt=self.WORK), lambda: self.pulls_world([{"number": 204, "head": self.head_of(wt), "state": "closed", "merged": True}]), worktree=True)
+        self.assertEqual((run.returncode, finish.returncode), (0, 0), finish.stdout)
+        self.assertEqual(self.worktrees(), [])
+        changes = self.changes(summary)
+        self.assertIn("its work is on GitHub (#204)", changes)
+        self.assertIn("refs/claude/leftovers/nightly-44006368956-1-1", changes)
+        self.assertIn("git fetch origin pull/204/head", changes)
+        self.assertEqual(git(self.project, "show", "refs/claude/leftovers/nightly-44006368956-1-1:scratch.txt"), "y")
+        self.assertEqual(git(self.project, "branch", "--list", "docs-x", f"worktree-{wt}"), "")
+        self.assertEqual(self.cli_json("status")["groups"], [])
+
+    def test_an_open_pull_request_keeps_it(self):
+        wt = "nightly-44006368956-1-1"
+        run, finish, summary = self.run_then(self.job_env(prompt=self.WORK), lambda: self.pulls_world([{"number": 205, "head": self.head_of(wt), "state": "open"}]), worktree=True)
+        self.assertEqual(self.worktrees(), [wt])
+        self.assertIn("pull request #205 is still open", self.changes(summary))
+
+    def test_commits_already_on_the_default_branch_go(self):
+        wt = "nightly-44006368956-1-1"
+        run, finish, summary = self.run_then(self.job_env(prompt=self.WORK), lambda: git(self.project, "push", "-q", "origin", f"{self.head_of(wt)}:refs/heads/main"), worktree=True)
+        self.assertEqual(self.worktrees(), [])
+        self.assertIn("its work is on GitHub (on main)", self.changes(summary))
+        self.assertEqual(self.head(), git(self.origin, "rev-parse", "main"), "and the checkout has it")
+
+    def test_a_later_run_takes_an_earlier_worktree_once_its_pull_request_merges(self):
+        first = self.job_env(prompt=self.WORK)
+        wt = "nightly-44006368956-1-1"
+        self.run_then(first, lambda: self.pulls_world([{"number": 205, "head": self.head_of(wt), "state": "open"}]), worktree=True)
+        self.assertEqual(self.worktrees(), [wt])
+        self.pulls_world([{"number": 205, "head": self.head_of(wt), "state": "closed", "merged": True}])
+        self.profile = "read-only"
+        run, finish, summary = self.job(self.job_env(run_id="44006368999", prompt="x"))
+        self.assertEqual(self.worktrees(), [])
+        self.assertIn(f"An earlier run's worktree `{self.project / '.claude' / 'worktrees' / wt}` went: its work is on GitHub (#205)", summary)
+
+    def test_a_group_no_scheduled_finish_marked_is_left_alone(self):
+        reply = self.cli_json("batch", "--group", "mine", "--worktree", "--task", self.WORK, timeout=120)
+        self.wait_state(reply["runs"][0]["run_id"], timeout=30)
+        self.pulls_world([{"number": 9, "head": self.head_of("mine-1"), "state": "closed", "merged": True}])
+        self.profile = "read-only"
+        self.job(self.job_env(prompt="x"))
+        self.assertEqual(self.worktrees(), ["mine-1"])
+
+    def test_no_pull_still_cleans_up(self):
+        wt = "nightly-44006368956-1-1"
+        before = self.head()
+        self.land({"theirs.md": "t\n"})
+        run, finish, summary = self.run_then(self.job_env(prompt=self.WORK), lambda: self.pulls_world([{"number": 204, "head": self.head_of(wt), "state": "closed", "merged": True}]), worktree=True, pull=False)
+        self.assertEqual(self.worktrees(), [])
+        self.assertEqual(self.head(), before, "the checkout is left as it is")
+
+
 class Names(Job):
     """A schedule's name as given reaches the run; only the worktree group, which is also a git branch and a Claude Code worktree name, is an ASCII slug of it."""
 

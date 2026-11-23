@@ -144,7 +144,7 @@ def clean_member(runs_dir, m, wt, others, force, removed, kept, group=None, land
             if branch_tip(wt["repo"], b) == head or commits_beyond(wt["repo"], b, wt["base"]) == 0:
                 if delete_branch(wt["repo"], b)[0]:
                     deleted.append(b)
-        out = {**entry, "landed": evidence["label"], "branch_deleted": wt["branch"] in deleted, "branches_deleted": deleted}
+        out = {**entry, "landed": evidence["label"], "branch_deleted": wt["branch"] in deleted, "branches_deleted": deleted, **({"pr": evidence["pr"]} if evidence.get("pr") else {})}
         if saved and saved.get("commit"):
             out["leftovers"] = {k: saved[k] for k in ("ref", "commit", "index_commit", "counts")}
         removed.append(out)

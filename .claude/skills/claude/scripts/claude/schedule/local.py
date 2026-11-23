@@ -57,8 +57,8 @@ def left_alone(path, reason, instead=None):
     return {"status": "not_updated", "path": path, "branch": None, "files_updated": False, "from": None, "to": None, "commits": [], "more": 0, "reason": reason, "files": [], "instead": instead}
 
 
-def sync_local(project, registry, *, expect_repo=None, skip_run=None):
-    """`git.sync_default` on the checkout at `project` — see its docstring for the reply — or, without changing anything, a `not_updated` reply when the checkout's origin is not `expect_repo` (`owner/name`, any letter case) or a run other than `skip_run` holds it (see `_holding`)."""
+def sync_local(project, registry, *, expect_repo=None, skip_run=None, fetch_only=False):
+    """`git.sync_default` on the checkout at `project` — see its docstring for the reply — or, without changing anything, a `not_updated` reply when the checkout's origin is not `expect_repo` (`owner/name`, any letter case) or a run other than `skip_run` holds it (see `_holding`). `fetch_only` only fetches the default branch, which changes no file and needs no run to be over: it tells a caller what GitHub holds (`branch`, `to`) without updating the checkout."""
     env = scrub_job_env(os.environ)
     top = toplevel(project, env=env) or str(project)
     q = shlex.quote(top)
@@ -66,6 +66,9 @@ def sync_local(project, registry, *, expect_repo=None, skip_run=None):
         found = repo_from_remote(remote_url(top, env=env))
         if (found or "").lower() != expect_repo.lower():
             return left_alone(top, f"origin of this checkout is {found or 'not a GitHub repository'}, not {expect_repo}", f"`git -C {q} remote -v` shows it; point origin at {expect_repo}, or `schedule --no-pull` this schedule")
+    if fetch_only:
+        with sync_lock(registry):
+            return sync_default(top, env=env, fetch_only=True)
     held = _holding(registry, top, skip_run, env)
     if held:
         return left_alone(top, held, "the next scheduled run's end tries again once it is over")

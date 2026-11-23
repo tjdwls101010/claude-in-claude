@@ -327,6 +327,17 @@ def _answer(snapshot, context, cuts):
     return text
 
 
+def went_text(r):
+    """Of a worktree `clean` removed because its work is on GitHub (K30): where its leftovers are kept and which branches went."""
+    text = f"its work is on GitHub ({r['landed']})"
+    kept = r.get("leftovers")
+    if kept:
+        text += f"; what was left uncommitted in it is kept as {code_span(kept['ref'])} (`git worktree add <path> {kept['commit'][:12]}` brings it back)"
+    if r.get("branches_deleted"):
+        text += f"; branch{'es' if len(r['branches_deleted']) > 1 else ''} " + ", ".join(code_span(b) for b in r["branches_deleted"]) + " went with it" + (f" (`git fetch origin pull/{r['pr']}/head` brings the commits back)" if r.get("pr") else "")
+    return text
+
+
 def _changes(snapshot, context):
     ch = context.get("changes")
     profile = (snapshot["meta"].get("settings") or {}).get("profile")
@@ -376,7 +387,13 @@ def _changes(snapshot, context):
         if len(edited) > len(listed):
             listed.append(f"- … and {len(edited) - len(listed)} more")
         body = ["Not a git checkout, so only what the edit tools wrote is known; files a shell command wrote are not here:", "\n".join(listed) or "- none"]
-    if ch.get("kept"):
+    if ch.get("landed"):
+        l = ch["landed"]
+        body.append(f"The worktree went: {went_text(l)}.")
+    elif ch.get("kept") and ch["kept"].get("open_pr"):
+        k = ch["kept"]
+        body.append(f"The worktree {code_span(k['path'])} is kept: its pull request #{k['open_pr']} is still open. A later run's end removes it once that is merged.")
+    elif ch.get("kept"):
         k = ch["kept"]
         body.append(f"The worktree is kept because it holds these changes: {code_span(k['path'])} on branch {code_span(k['branch'])}. Move what you need into your tree, then `{k['clean']}`.")
     elif ch.get("branch_kept"):
