@@ -195,6 +195,51 @@ class Leftovers(unittest.TestCase):
         saved = self.preserve()
         self.assertIn("100 MiB", saved["kept_because"])
 
+    # Claude review of PR ②: B1, B2, S2, S5, N1.
+
+    def test_a_second_keeping_does_not_replace_the_first(self):
+        (self.wt / "u.txt").write_text("first\n")
+        first = self.preserve()
+        (self.wt / "u.txt").write_text("second\n")
+        second = self.preserve()
+        self.assertNotEqual(second["ref"], first["ref"])
+        self.assertEqual(git(self.repo, "show", f"{first['ref']}:u.txt"), "first")
+        self.assertEqual(git(self.repo, "show", f"{second['ref']}:u.txt"), "second")
+
+    def test_a_changed_worktreeinclude_file_is_never_stored(self):
+        (self.repo / ".worktreeinclude").write_text(".env\n")
+        (self.wt / ".env").write_text("TOKEN=changed\n")
+        (self.wt / "u.txt").write_text("u\n")
+        saved = self.preserve()
+        self.assertIn(".worktreeinclude", saved["kept_because"])
+        self.assertEqual(git(self.repo, "for-each-ref", "refs/claude"), "")
+
+    def test_a_worktreeinclude_file_the_main_checkout_changed_since_is_not_stored(self):
+        (self.repo / ".worktreeinclude").write_text(".env\n")
+        (self.repo / ".env").write_text("SECRET=rotated\n")
+        (self.wt / "u.txt").write_text("u\n")
+        saved = self.preserve()
+        self.assertIn("kept_because", saved, "a copy that no longer matches is still the include file, and may be a secret")
+
+    def test_a_filter_that_would_change_the_content_keeps_the_worktree(self):
+        git(self.repo, "config", "filter.strip.clean", "sed /OUTPUT/d")
+        (self.wt / ".gitattributes").write_text("*.out filter=strip\n")
+        (self.wt / "result.out").write_text("code\nOUTPUT precious\n")
+        saved = self.preserve()
+        self.assertIn("differ", saved["kept_because"])
+
+    def test_too_much_of_anything_is_left_where_it_is(self):
+        with open(self.wt / "big.bin", "wb") as f:
+            f.truncate(101 * 1024 * 1024)
+        self.assertIn("100 MiB", self.preserve()["kept_because"])
+
+    def test_a_path_with_glob_characters_drops_only_itself(self):
+        (self.wt / "[a].txt").write_text("startup\n")
+        self.snap = g.startup_snapshot(str(self.wt), str(self.repo))
+        (self.wt / "a.txt").write_text("changed\n")
+        saved = self.preserve()
+        self.assertEqual(git(self.repo, "show", f"{saved['commit']}:a.txt"), "changed")
+
     def test_a_file_that_cannot_be_read_is_left_where_it_is(self):
         # Codex review of PR ②: an unreadable file made the whole Finish fail with no summary.
         (self.wt / "build").mkdir()
