@@ -253,6 +253,14 @@ class TurnPreamble(unittest.TestCase):
         self.assertIn("nobody is watching", text.lower())
         self.assertIn("GitHub Actions run summary in someone/project", text)
 
+    def test_a_scheduled_run_is_told_the_job_updates_the_checkout(self):
+        origin = {"kind": "schedule", "name": "nightly-review", "trigger": "dispatcher", "when": "2026-11-17 03:00 KST", "repository": "someone/project", "job": "1-1", "project": "/Users/someone/vault"}
+        told = "When you end, this job tries to fast-forward the default branch of /Users/someone/vault from GitHub"
+        self.assertIn(told, cli.turn_preamble("write", origin={**origin, "pull": True}))
+        self.assertIn("do not pull that checkout yourself", cli.turn_preamble("write", origin={**origin, "pull": True}))
+        self.assertNotIn(told, cli.turn_preamble("write", origin={**origin, "pull": False}))
+        self.assertNotIn(told, cli.turn_preamble("write", origin=origin), "an origin recorded before the setting says nothing of it")
+
 
 class WorktreeLocation(unittest.TestCase):
     def test_claude_code_naming(self):

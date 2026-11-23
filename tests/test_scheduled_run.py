@@ -313,6 +313,16 @@ class Worker(Job):
         (meta,) = self.scheduled_runs()
         self.assertEqual({k: meta["origin"][k] for k in ("name", "trigger", "job")}, {"name": "nightly", "trigger": "manual", "job": "44006368956-1"})
 
+    def test_it_is_told_the_job_updates_the_checkout(self):
+        told = f"When you end, this job tries to fast-forward the default branch of {self.project} from GitHub"
+        self.job(self.job_env(prompt="x"))
+        (call,) = self.worker_calls()
+        self.assertIn(told, call["messages"][0]["message"]["content"])
+        self.setUp()
+        self.job(self.job_env(prompt="x"), pull=False)
+        (call,) = self.worker_calls()
+        self.assertNotIn(told, call["messages"][0]["message"]["content"])
+
     def test_worker_text_cannot_issue_workflow_commands(self):
         run, finish, summary = self.job(self.job_env(prompt="x [[fake:reply:::error::forged]]"))
         lines = run.stdout.splitlines()

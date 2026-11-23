@@ -35,10 +35,13 @@ WORKER_CONTEXT = (
 
 
 def turn_preamble(profile, *, group=None, worktree=None, origin=None):
-    """What this turn's prompt is prefixed with: that it is a scheduled run nobody watches (K11), the group a batch member belongs to when it has others, and a worktree member's checkout. None when there is nothing to say."""
+    """What this turn's prompt is prefixed with: that it is a scheduled run nobody watches (K11) and, unless it is `--no-pull`, that the job updates the checkout after it (K30), the group a batch member belongs to when it has others, and a worktree member's checkout. None when there is nothing to say."""
     lines = []
     if origin and origin.get("kind") == "schedule":
         lines.append(f"[This is a scheduled run of {origin['name']} ({origin.get('trigger')}, {origin.get('when')}). Nobody is watching it and nobody can answer it; your final message is published as the GitHub Actions run summary in {origin.get('repository')}, so write it for a reader who sees only that message and the prompt.]")
+        if origin.get("pull"):
+            # K30: the Finish step does it, from outside any worktree; a worker told to pull from one cannot, and would report that it could not.
+            lines.append(f"[When you end, this job tries to fast-forward the default branch of {origin.get('project')} from GitHub and reports the result in the run summary, so do not pull that checkout yourself.]")
     if group and group.get("size", 0) > 1:
         lines.append(f"[You are member {group['index']} of {group['size']} in group {group['name']}, started together on related tasks; the others work in parallel and you will not see their work.]")
     if worktree:

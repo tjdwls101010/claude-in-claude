@@ -209,7 +209,7 @@ def scheduled_run(spec, env, write):
         schema_path = str(Path(schedule_dir(registry, name)) / f"schema-{job}.json")
         Path(schema_path).parent.mkdir(parents=True, exist_ok=True)
         Path(schema_path).write_text(env["CLAUDE_SCHEDULE_SCHEMA"], encoding="utf-8")
-    origin = {"kind": "schedule", "name": name, "trigger": trigger, "slot": slot, "job": job, "url": ctx["url"], "repository": ctx["repository"], "when": local_time(slot if slot is not None else clock(), spec["timezone"])}
+    origin = {"kind": "schedule", "name": name, "trigger": trigger, "slot": slot, "job": job, "url": ctx["url"], "repository": ctx["repository"], "when": local_time(slot if slot is not None else clock(), spec["timezone"]), "project": project, "pull": spec.get("pull") is not False}
     if retry_of:
         origin["retry_of"] = retry_of["job"]
     _scrub_worker_env()
