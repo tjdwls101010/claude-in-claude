@@ -226,3 +226,18 @@ codex(read-only, 2026-11-23, run `20261123-215024-plan-review-39f7`): "승인 �
 - R10 CLI·호환 → `pull`은 False일 때만 기록, opt-out은 실행에만, 정의 명령 `local` 표.
 - R11 사용자 문구 → 앞머리 문구, `ref_updated` 구별, 원인별 `instead`, Local checkout 행 독립.
 - R12 스모크 배치 → PR별 시나리오 분리, 기존 시나리오 보존, 로컬 bare origin.
+
+## 구현 기록 (PR ①)
+
+계획과 달라진 것과 그 이유. 결정별 근거는 각 커밋 본문에 있다.
+
+- **갱신 규칙의 자리**: `git` 계층(system)은 `github`·`registry`를 import할 수 없다(구조 테스트). 그래서 잡 핸들 제거, origin 대조, 막는 런 판정, 잠금은 `schedule/local.py`의 `sync_local`이 맡는다. `git.sync_default`는 env와 `guard`(바꾸기 직전에 다시 묻는 콜백)를 받는다. 잠금은 `registry.sync_lock`(`.locks/sync.lock`)이다.
+- **`remote_url`**: `git remote get-url`(insteadOf 적용 후) 대신 설정값을 읽고, 여럿이면 첫 번째를 쓴다. 테스트가 bare 저장소를 GitHub 자리에 세울 수 있고, 대조한 저장소와 받아 오는 저장소가 일치한다.
+- **SKILL.md**: 바꾸지 않는다(성진). 같은 사실은 `schedule --help`의 "Your checkout" 문단과 작업자 앞머리가 말한다.
+- **스모크**: 작업자가 PR을 머지하는 대신 테스트가 Contents API로 커밋을 올린다(`test_what_lands_on_github_reaches_the_checkout`). 임시 저장소 `claude-schedule-probe`와 임시 러너에서 통과했다.
+- **codex 리뷰 4라운드**(R1 블로커 6과 should-fix 5, R2 블로커 1과 6, R3 블로커 1과 3, R4 should-fix 1)를 모두 반영했다. 계획보다 늘어난 것:
+  - 사람의 git 설정을 무력화하는 플래그(`--no-autostash --no-squash --refmap= --no-write-fetch-head`)와 바꾼 뒤의 확인
+  - 막는 런의 판정: git이 그 디렉터리를 이 체크아웃에 두는가(samefile, 사라진 경로는 상위로), 그리고 Finish가 변경을 읽기 전인 예약 런(`changes_read_at`, 옛 런은 summary.md)
+  - Run이 스냅숏부터 런 게시까지 sync 잠금을 잡는 것(`start`가 `on_published`를 넘긴다)
+- **받아들이지 않은 지적**: 다른 레지스트리(`--runs-dir`)의 런까지 보는 체크아웃 단위 잠금(LS04 일부). `start`의 concurrent writers 검사와 같은 범위에 두고 `성진:`으로 남겼다.
+- **PR ②에 넘기는 것**: `--no-pull` 예약은 Finish에서 갱신 대신 받기만(`fetch_only`) 해야 정리 판정에 쓸 원격 커밋을 안다. PR ①에서는 `--no-pull`이면 git을 건드리지 않는다.
