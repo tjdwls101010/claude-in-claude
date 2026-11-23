@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shlex
 import time
+from pathlib import Path
 
 from claude.git import remote_url, sync_default, toplevel
 from claude.github import repo_from_remote, scrub_job_env
@@ -15,12 +16,22 @@ AWAITING_FINISH_SECONDS = 15 * 60
 
 
 def _works_in(cwd, top, env):
-    """Whether a run whose directory is `cwd` works in the checkout at `top`: git places that directory in this checkout, not in a worktree or repository of its own below it, compared as the file system sees it (a Mac's ignores letter case)."""
+    """Whether a run whose directory is `cwd` works in the checkout at `top`: git places that directory in this checkout, not in a worktree or repository of its own below it, compared as the file system sees it (a Mac's ignores letter case). A directory renamed or removed under the run is judged by the nearest part of its path still there, which errs toward holding the update off."""
+    path = Path(cwd)
+    while not path.is_dir() and path != path.parent:
+        path = path.parent
     try:
-        own = toplevel(cwd, env=env) if os.path.isdir(cwd) else None
+        own = toplevel(str(path), env=env)
         return bool(own) and os.path.samefile(own, top)
     except OSError:
         return False
+
+
+def _changes_unread(run_dir, meta):
+    """Whether a scheduled run's Finish has not yet read what it changed. A run started by this version (its origin records `pull`) says so with `changes_read_at`; an older one only by the summary its Finish left beside it."""
+    if "pull" in (meta.get("origin") or {}):
+        return not meta.get("changes_read_at")
+    return not (Path(run_dir) / "summary.md").exists()
 
 
 def _holding(registry, top, skip, env):
@@ -32,7 +43,7 @@ def _holding(registry, top, skip, env):
         meta = reap(run_dir)
         if is_live(meta):
             why = f"run {meta['run_id']} is working in this checkout, and updating it would change files under it"
-        elif (meta.get("origin") or {}).get("kind") == "schedule" and not meta.get("changes_read_at") and time.time() - (meta.get("ended_at") or 0) < AWAITING_FINISH_SECONDS:
+        elif (meta.get("origin") or {}).get("kind") == "schedule" and _changes_unread(run_dir, meta) and time.time() - (meta.get("ended_at") or 0) < AWAITING_FINISH_SECONDS:
             why = f"scheduled run {meta['run_id']} worked in this checkout and its job has not read what it changed yet"
         else:
             continue

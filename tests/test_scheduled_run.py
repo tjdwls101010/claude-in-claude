@@ -555,6 +555,18 @@ class LocalCheckout(Job):
         self.assertIn(busy["run_id"], summary.split("[!WARNING]", 1)[1])
         self.cli("stop", "--run", busy["run_id"])
 
+    def test_a_run_whose_directory_was_renamed_still_holds_it(self):
+        # Codex review R3-01: the recorded directory is gone, but the worker still works in the checkout.
+        inside = self.project / "inside"
+        inside.mkdir()
+        busy = self.cli_json("start", "x [[fake:sleep:60]]", "--profile", "write", "--cwd", str(inside))
+        inside.rename(self.project / "moved")
+        before = self.head()
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, worktree=True)
+        self.assertEqual(self.head(), before)
+        self.assertIn(busy["run_id"], summary.split("[!WARNING]", 1)[1])
+        self.cli("stop", "--run", busy["run_id"])
+
     def test_a_run_in_a_worktree_of_its_own_below_the_checkout_does_not_hold_it(self):
         # Codex review R2-02: git places that run in another checkout, whatever its path looks like.
         wt = self.project / ".claude" / "worktrees" / "mine"

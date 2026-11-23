@@ -116,8 +116,8 @@ def _scrub_worker_env():
             del os.environ[key]
 
 
-def _start_worker(spec, prompt, schema_path, registry, group, origin):
-    """Start the worker as `start` would, or — given a `group` — as that one-member `batch --worktree` group (K10). Returns (run_id, refusal)."""
+def _start_worker(spec, prompt, schema_path, registry, group, origin, on_published=None):
+    """Start the worker as `start` would, or — given a `group` — as that one-member `batch --worktree` group (K10). `on_published` is called once the run is in the registry (for `start`). Returns (run_id, refusal)."""
     s = spec["settings"]
     if group:
         reply = batch(name=group, task_args=[prompt], tasks_file=None, defaults={"profile": s["profile"], "model": s["model"], "effort": s["effort"], "schema": schema_path, "timeout": s["timeout"], "cwd": None}, cwd=spec["project"], use_worktrees=True, runs_dir=registry, origin=origin)
@@ -125,7 +125,7 @@ def _start_worker(spec, prompt, schema_path, registry, group, origin):
         if not member.get("run_id"):
             return None, member.get("error") or "the worktree member did not start"
         return member["run_id"], None
-    reply = start(prompt=prompt, cwd=spec["project"], flags={"profile": s["profile"], "model": s["model"], "effort": s["effort"], "schema": schema_path, "cwd": spec["project"]}, label=spec["name"], timeout=s["timeout"], runs_dir=registry, origin=origin)
+    reply = start(prompt=prompt, cwd=spec["project"], flags={"profile": s["profile"], "model": s["model"], "effort": s["effort"], "schema": schema_path, "cwd": spec["project"]}, label=spec["name"], timeout=s["timeout"], runs_dir=registry, origin=origin, on_published=on_published)
     return reply["run_id"], None
 
 
@@ -214,15 +214,17 @@ def scheduled_run(spec, env, write):
     if retry_of:
         origin["retry_of"] = retry_of["job"]
     _scrub_worker_env()
-    in_place = not spec.get("worktree")
+    # K27, K30: from the snapshot the run's changes are measured against until the run is in the registry — from then on it holds the checkout's updates off itself — nothing may update the checkout, or that would count as the run's change. The lock goes as soon as the run is published, not after the init wait.
+    held = contextlib.ExitStack()
     try:
-        # K27, K30: from the snapshot the run's changes are measured against until its worker is live — and so holds the checkout's updates off — nothing may update the checkout, or that would count as the run's change.
-        with sync_lock(registry) if in_place else contextlib.nullcontext():
-            if in_place:
-                update_job(registry, name, job, {"tree_before": status_snapshot(project)})
-            run_id, refused = _start_worker(spec, prompt, schema_path, registry, group, origin)
+        if not spec.get("worktree"):
+            held.enter_context(sync_lock(registry))
+            update_job(registry, name, job, {"tree_before": status_snapshot(project)})
+        run_id, refused = _start_worker(spec, prompt, schema_path, registry, group, origin, on_published=lambda meta: held.close())
     except Refusal as e:
         run_id, refused = None, e.message
+    finally:
+        held.close()
     if refused:
         update_job(registry, name, job, {"outcome": {"kind": "refused", "error": refused}})
         step.command(annotation("error", f"{name}: not started", refused))

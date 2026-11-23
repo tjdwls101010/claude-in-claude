@@ -90,7 +90,7 @@ def _count(top, spec, env):
 
 def _commits(top, old, new, env):
     """([{sha7, subject}] from `old` to `new`, newest first, at most COMMITS_SHOWN; how many more there are)."""
-    code, out, _ = run_git(top, "log", "--encoding=UTF-8", f"--max-count={COMMITS_SHOWN}", "--format=%h%x00%s", f"{old}..{new}", env=env, errors="replace")
+    code, out, _ = run_git(top, "log", "--encoding=UTF-8", f"--max-count={COMMITS_SHOWN}", "--format=%h%x00%s", f"{old}..{new}", env=env, encoding="utf-8", errors="replace")
     out = out if code == 0 else ""
     shown = []
     for line in out.splitlines():
