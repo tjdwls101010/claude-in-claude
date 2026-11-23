@@ -157,6 +157,12 @@ def detached_commits(repo, path, branch):
     return int(out.strip()) if code == 0 and out.strip().isdigit() else 0
 
 
+def branch_tip(repo, branch):
+    """The commit local `branch` points at, or None."""
+    code, out, _ = run_git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}")
+    return out.strip() if code == 0 and out.strip() else None
+
+
 def branch_exists(repo, branch):
     code, _, _ = run_git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}")
     return code == 0

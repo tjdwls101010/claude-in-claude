@@ -6,7 +6,9 @@ import json
 import os
 import shutil
 
-from support.harness import FAST_TIMINGS, Sandbox, git
+from support.harness import FAST_TIMINGS, Sandbox, engine, git
+
+batch = engine("claude.batch")
 
 
 class Clean(Sandbox):
@@ -251,3 +253,62 @@ class ReviewFindings(Sandbox):
         self.wait_state(reply["runs"][0]["run_id"])
         call = [c for c in self.fake_calls() if c["env"].get("CLAUDE_SKILL_RUN") == reply["runs"][0]["run_id"]][0]
         self.assertEqual(call["cwd"], str(other))
+
+
+class Landed(Clean):
+    """`clean` given `landed`, as a schedule's Finish gives it (K30): a member whose commits GitHub already holds goes, what it left uncommitted kept in git, and its branches with it; one whose pull request is open stays."""
+
+    def worked(self, name="pr"):
+        self.batch(name, "x [[fake:write:notes.md]] [[fake:commit:work]] [[fake:write_after:scratch.txt]] [[fake:branch:docs-x]]")
+        return git(self.wt(f"{name}-1"), "rev-parse", "HEAD")
+
+    def clean_landed(self, name, answer):
+        asked = []
+        reply = batch.clean(name=name, cwd=str(self.project), landed=lambda head: asked.append(head) or answer)
+        return reply, asked
+
+    def test_landed_work_goes_and_what_it_left_is_kept_in_git(self):
+        head = self.worked()
+        reply, asked = self.clean_landed("pr", {"landed": True, "label": "#204"})
+        self.assertEqual(asked, [head])
+        (removed,) = reply["removed"]
+        self.assertEqual(removed["landed"], "#204")
+        self.assertEqual(sorted(removed["branches_deleted"]), ["docs-x", "worktree-pr-1"])
+        self.assertTrue(reply["name_released"])
+        self.assertFalse(self.wt("pr-1").exists())
+        self.assertEqual(git(self.project, "branch", "--list", "docs-x", "worktree-pr-1"), "")
+        ref = removed["leftovers"]["ref"]
+        self.assertEqual(ref, "refs/claude/leftovers/pr-1")
+        self.assertEqual(git(self.project, "show", f"{ref}:scratch.txt"), "y")
+        self.assertNotIn(".env", git(self.project, "ls-tree", "-r", "--name-only", ref).split(), "the .worktreeinclude copy is not stored")
+
+    def test_an_open_pull_request_keeps_it(self):
+        self.worked()
+        reply, _ = self.clean_landed("pr", {"landed": False, "open_pr": 7})
+        (kept,) = reply["kept"]
+        self.assertEqual(kept["open_pr"], 7)
+        self.assertIn("#7", kept["reason"])
+        self.assertTrue(self.wt("pr-1").exists())
+
+    def test_without_an_answer_the_old_rules_hold(self):
+        self.worked()
+        reply, _ = self.clean_landed("pr", None)
+        (kept,) = reply["kept"]
+        self.assertIn("would lose", kept["reason"])
+        self.assertTrue(self.wt("pr-1").exists())
+
+    def test_what_cannot_be_kept_whole_keeps_the_worktree(self):
+        self.worked()
+        inner = self.wt("pr-1") / "inner"
+        inner.mkdir()
+        git(inner, "init", "-q")
+        reply, _ = self.clean_landed("pr", {"landed": True, "label": "on main"})
+        (kept,) = reply["kept"]
+        self.assertIn("repository of its own", kept["reason"])
+        self.assertTrue(self.wt("pr-1").exists())
+
+    def test_a_member_without_commits_is_not_asked(self):
+        self.batch("ro", "look only [[fake:ccwrites]]")
+        reply, asked = self.clean_landed("ro", {"landed": True, "label": "#1"})
+        self.assertEqual(asked, [])
+        self.assertTrue(reply["name_released"])
