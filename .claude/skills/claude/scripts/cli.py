@@ -282,7 +282,7 @@ def build_parser():
     p.add_argument("--schema", metavar="FILE", help="a JSON Schema file: the run's answer is structured output of that shape, shown as JSON in the summary; its text goes into the workflow, so the file may go")
     p.add_argument("--timeout", type=positive, metavar="SEC", help=f"stop the run after SEC seconds and record it timed_out (default {SCHEDULE_DEFAULTS['timeout']})")
     wt = p.add_mutually_exclusive_group()
-    wt.add_argument("--worktree", dest="worktree", action="store_const", const=True, help="run each time in a fresh git worktree of the local HEAD instead of the checkout (write and auto only); a worktree with changes is kept for you to take them, one without is removed")
+    wt.add_argument("--worktree", dest="worktree", action="store_const", const=True, help="run each time in a fresh git worktree of the local HEAD instead of the checkout (write and auto only); a worktree without changes is removed, and so is one whose commits are already on GitHub — on the default branch, or the head of a pull request merged into it — with what it left uncommitted kept in git (refs/claude/leftovers/…); one whose pull request is open, or with changes that are not on GitHub, is kept for you, and a later run's end looks at it again")
     wt.add_argument("--no-worktree", dest="worktree", action="store_const", const=False, help="run in the project checkout as it is when the job starts (the default)")
     pl = p.add_mutually_exclusive_group()
     pl.add_argument("--pull", dest="pull", action="store_const", const=True, help="when each run ends, whatever its outcome, fast-forward the project checkout's default branch to what GitHub holds, so what the worker merged there is here too (the default; see below)")

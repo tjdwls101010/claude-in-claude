@@ -122,12 +122,17 @@ def _ahead_reason(top, local, remote, branch, env):
     return f"local {branch} has {mine} commit{'s' if mine != 1 else ''} origin does not have"
 
 
+def contains(path, ref, commit, env=None):
+    """Whether `ref` (a branch's full name or a commit) in the repository at `path` holds `commit`; False when either is unknown here."""
+    if not ref or not commit:
+        return False
+    code, _, _ = run_git(path, "merge-base", "--is-ancestor", commit, ref, env=env)
+    return code == 0
+
+
 def branch_contains(path, branch, commit, env=None):
     """Whether the local `branch` of the repository at `path` holds `commit` (False when either is unknown here)."""
-    if not branch or not commit:
-        return False
-    code, _, _ = run_git(path, "merge-base", "--is-ancestor", commit, f"refs/heads/{branch}", env=env)
-    return code == 0
+    return bool(branch) and contains(path, f"refs/heads/{branch}", commit, env)
 
 
 def sync_default(checkout, *, fetch_only=False, env=None, guard=None):

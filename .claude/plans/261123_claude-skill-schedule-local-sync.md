@@ -241,3 +241,16 @@ codex(read-only, 2026-11-23, run `20261123-215024-plan-review-39f7`): "승인 �
   - Run이 스냅숏부터 런 게시까지 sync 잠금을 잡는 것(`start`가 `on_published`를 넘긴다)
 - **받아들이지 않은 지적**: 다른 레지스트리(`--runs-dir`)의 런까지 보는 체크아웃 단위 잠금(LS04 일부). `start`의 concurrent writers 검사와 같은 범위에 두고 `성진:`으로 남겼다.
 - **PR ②에 넘기는 것**: `--no-pull` 예약은 Finish에서 갱신 대신 받기만(`fetch_only`) 해야 정리 판정에 쓸 원격 커밋을 안다. PR ①에서는 `--no-pull`이면 git을 건드리지 않는다.
+
+## 구현 기록 (PR ②)
+
+- **리뷰어**: codex가 PR ② 리뷰 도중 사용량 한도에 걸려(2026-11-24 11:22까지), 첫 지적(보존 중 PermissionError) 하나를 낸 뒤 Claude 작업자(opus, read-only)가 2라운드를 대신했다. 다른 모델 계열의 시각은 PR ②의 대부분에 없다.
+- **보존(`preserve_leftovers`)이 계획보다 늘어난 것**:
+  - 임시 index를 실제 index의 복사본에서 시작한다. `read-tree`로 만들면 볼트 규모(추적 파일 24,738개, 17 GiB)에서 30초 제한에 걸렸다.
+  - ref는 만들기만 하고 옮기지 않는다(`-2`, `-3`…).
+  - `.worktreeinclude` 패턴에 걸리는 파일은 담지 않고, 바뀌었으면 worktree를 남긴다.
+  - 담은 뒤 `hash-object --no-filters`로 디스크와 바이트를 대조한다.
+  - 100 MiB 상한은 남은 것 전부를 센다.
+- **브랜치 삭제**: 그룹 시작 때의 로컬 브랜치 목록(`worktree.branches_before`)에 없던 브랜치만 런이 만든 것으로 본다. 기본 브랜치는 지우지 않는다. reflog 시각으로 가리던 첫 시도는 초 단위와 gc에 틀려 버렸다.
+- **다시 보기(sweep)**: `finished_at` 뒤에 바뀐 worktree(`last_changed`: index mtime, HEAD reflog 최신 항목 시각, 남은 항목 mtime)는 사람이 일하는 중일 수 있어 남긴다. 그래서 우리 자신의 status는 `GIT_OPTIONAL_LOCKS=0`으로 index를 쓰지 않는다.
+- **기존 결함 수리**: git은 읽지 못한 디렉터리를 경고만 하고 건너뛰어, `clean`(사람의 명령 포함)이 그런 worktree를 지울 수 있었다. `status_entries`가 그 경고를 보면 None이다.

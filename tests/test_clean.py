@@ -6,10 +6,14 @@ import json
 import os
 import shutil
 
-from support.harness import FAST_TIMINGS, Sandbox, git
+from support.harness import FAST_TIMINGS, Sandbox, engine, git
+
+batch = engine("claude.batch")
 
 
-class Clean(Sandbox):
+class Worktrees(Sandbox):
+    """A project with a .worktreeinclude secret, and helpers to start worktree members and clean them."""
+
     def setUp(self):
         super().setUp()
         (self.project / ".gitignore").write_text(".env\nbuild/\n")
@@ -34,6 +38,8 @@ class Clean(Sandbox):
     def clean(self, name, *args, expect=0):
         return self.cli_json("clean", "--group", name, *args, expect=expect, timeout=120)
 
+
+class Clean(Worktrees):
     def test_untouched_worktree_goes_without_force(self):
         reply = self.batch("ok", "look only [[fake:ccwrites]]")
         self.assertTrue((self.wt("ok-1") / ".claude" / "histories").is_symlink())
@@ -251,3 +257,118 @@ class ReviewFindings(Sandbox):
         self.wait_state(reply["runs"][0]["run_id"])
         call = [c for c in self.fake_calls() if c["env"].get("CLAUDE_SKILL_RUN") == reply["runs"][0]["run_id"]][0]
         self.assertEqual(call["cwd"], str(other))
+
+
+class Landed(Worktrees):
+    """`clean` given `landed`, as a schedule's Finish gives it (K30): a member whose commits GitHub already holds goes, what it left uncommitted kept in git, and its branches with it; one whose pull request is open stays."""
+
+    def worked(self, name="pr"):
+        self.batch(name, "x [[fake:write:notes.md]] [[fake:commit:work]] [[fake:write_after:scratch.txt]] [[fake:branch:docs-x]]")
+        return git(self.wt(f"{name}-1"), "rev-parse", "HEAD")
+
+    def clean_landed(self, name, answer):
+        asked = []
+        reply = batch.clean(name=name, cwd=str(self.project), landed=lambda head: asked.append(head) or answer)
+        return reply, asked
+
+    def test_landed_work_goes_and_what_it_left_is_kept_in_git(self):
+        head = self.worked()
+        reply, asked = self.clean_landed("pr", {"landed": True, "label": "#204"})
+        self.assertEqual(asked, [head])
+        (removed,) = reply["removed"]
+        self.assertEqual(removed["landed"], "#204")
+        self.assertEqual(sorted(removed["branches_deleted"]), ["docs-x", "worktree-pr-1"])
+        self.assertTrue(reply["name_released"])
+        self.assertFalse(self.wt("pr-1").exists())
+        self.assertEqual(git(self.project, "branch", "--list", "docs-x", "worktree-pr-1"), "")
+        ref = removed["leftovers"]["ref"]
+        self.assertEqual(ref, "refs/claude/leftovers/pr-1")
+        self.assertEqual(git(self.project, "show", f"{ref}:scratch.txt"), "y")
+        self.assertNotIn(".env", git(self.project, "ls-tree", "-r", "--name-only", ref).split(), "the .worktreeinclude copy is not stored")
+
+    def test_an_open_pull_request_keeps_it(self):
+        self.worked()
+        reply, _ = self.clean_landed("pr", {"landed": False, "open_pr": 7})
+        (kept,) = reply["kept"]
+        self.assertEqual(kept["open_pr"], 7)
+        self.assertIn("#7", kept["reason"])
+        self.assertTrue(self.wt("pr-1").exists())
+
+    def test_without_an_answer_the_old_rules_hold(self):
+        self.worked()
+        reply, _ = self.clean_landed("pr", None)
+        (kept,) = reply["kept"]
+        self.assertIn("would lose", kept["reason"])
+        self.assertTrue(self.wt("pr-1").exists())
+
+    def test_what_cannot_be_kept_whole_keeps_the_worktree(self):
+        self.worked()
+        inner = self.wt("pr-1") / "inner"
+        inner.mkdir()
+        git(inner, "init", "-q")
+        reply, _ = self.clean_landed("pr", {"landed": True, "label": "on main"})
+        (kept,) = reply["kept"]
+        self.assertIn("repository of its own", kept["reason"])
+        self.assertTrue(self.wt("pr-1").exists())
+
+    def test_a_member_without_commits_is_not_asked(self):
+        self.batch("ro", "look only [[fake:ccwrites]]")
+        reply, asked = self.clean_landed("ro", {"landed": True, "label": "#1"})
+        self.assertEqual(asked, [])
+        self.assertTrue(reply["name_released"])
+
+    def test_a_directory_git_cannot_read_keeps_it(self):
+        # git only warns about a directory it cannot open; what is in it is unknown, so nothing may be removed.
+        self.worked()
+        hidden = self.wt("pr-1") / "hidden"
+        hidden.mkdir()
+        (hidden / "mine.txt").write_text("mine\n")
+        os.chmod(hidden, 0o000)
+        self.addCleanup(os.chmod, hidden, 0o755)
+        for answer in ({"landed": True, "label": "#204"}, None):
+            with self.subTest(answer=answer):
+                reply, _ = self.clean_landed("pr", answer)
+                (kept,) = reply["kept"]
+                self.assertIn("cannot read", kept["reason"])
+                self.assertTrue(self.wt("pr-1").exists())
+
+    # Claude review of PR ②: S1, S3.
+
+    def test_a_branch_that_was_there_before_the_run_stays(self):
+        git(self.project, "branch", "person")
+        head = self.worked()
+        git(self.wt("pr-1"), "switch", "-q", "person")
+        git(self.wt("pr-1"), "merge", "-q", "--ff-only", head)
+        reply, _ = self.clean_landed("pr", {"landed": True, "label": "#204", "default": "main"})
+        (removed,) = reply["removed"]
+        self.assertNotIn("person", removed["branches_deleted"])
+        self.assertEqual(git(self.project, "rev-parse", "person"), head)
+
+    def test_the_default_branch_is_never_deleted(self):
+        self.worked()
+        reply, _ = self.clean_landed("pr", {"landed": True, "label": "on docs-x", "default": "docs-x"})
+        (removed,) = reply["removed"]
+        self.assertNotIn("docs-x", removed["branches_deleted"])
+        self.assertTrue(git(self.project, "branch", "--list", "docs-x"))
+
+    def test_a_worktree_changed_after_a_time_is_kept(self):
+        import time
+        self.worked()
+        since = time.time()
+        time.sleep(1.1)
+        (self.wt("pr-1") / "later.txt").write_text("someone is here\n")
+        reply = batch.clean(name="pr", cwd=str(self.project), landed=lambda head: {"landed": True, "label": "#204"}, untouched_since=since)
+        (kept,) = reply["kept"]
+        self.assertIn("changed after", kept["reason"])
+        self.assertTrue(self.wt("pr-1").exists())
+
+    def test_a_dormant_branch_whose_reflog_gc_trimmed_stays(self):
+        # Claude review R2-2: its oldest reflog entry is the run's commit, not its creation.
+        git(self.project, "branch", "dormant")
+        git(self.project, "reflog", "expire", "--expire=now", "refs/heads/dormant")
+        head = self.worked()
+        git(self.wt("pr-1"), "switch", "-q", "dormant")
+        git(self.wt("pr-1"), "merge", "-q", "--ff-only", head)
+        reply, _ = self.clean_landed("pr", {"landed": True, "label": "#204", "default": "main"})
+        (removed,) = reply["removed"]
+        self.assertNotIn("dormant", removed["branches_deleted"])

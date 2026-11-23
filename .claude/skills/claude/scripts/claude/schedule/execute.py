@@ -21,23 +21,26 @@ from zoneinfo import ZoneInfo
 from claude.batch import batch, clean
 from claude.claude_cli import auth_status, claude_version, render_rows, sandbox_prereqs, version_floor_check
 from claude.errors import Refusal
-from claude.git import commits_beyond, committed_files, head_commit, numstat, status_snapshot, toplevel
-from claude.github import JOB_HANDLES, GitHubError, annotation, job_context, legacy_workflow_file, resume_commands, set_workflow_enabled, stop_commands, write_output, write_summary
+from claude.git import commits_beyond, committed_files, contains, head_commit, numstat, status_snapshot, toplevel
+from claude.github import JOB_HANDLES, GitHubError, annotation, job_context, legacy_workflow_file, pull_evidence, resume_commands, scrub_job_env, set_workflow_enabled, stop_commands, write_output, write_summary
 from claude.launchd import remove_agent
 from claude.observe import snapshot, wait_ended
-from claude.registry import claim_slot, claude_alive, find_by_origin_job, group_view, is_live, list_groups, read_definition, read_job, reap, record_job, resolve_runs_dir, schedule_dir, schedule_lock, sync_lock, update_job, update_meta
+from claude.registry import claim_slot, claude_alive, find_by_origin_job, group_view, is_live, list_groups, read_definition, read_job, reap, record_job, resolve_runs_dir, schedule_dir, schedule_lock, sync_lock, update_group, update_job, update_meta
 from claude.runs import start, stop
 from claude.util import entry_path, invocation, now
 
 from .local import left_alone, sync_local
 from .spec import dispatcher_holder, dispatcher_label, holder_words, worktree_group
-from .summary import code_span, render_summary
+from .summary import code_span, render_summary, went_text
 from .times import current_slot
 
 # A one-off's automatic triggers more than this after its time do nothing: GitHub drops a queued job after 24 hours, and a cron without a year would otherwise fire again a year later (K4).
 ONE_OFF_EXPIRY = 26 * 3600
 FOLLOW_SECONDS = 2.0
 AUTOMATIC = ("dispatcher", "schedule")
+# How much of the earlier schedules' worktree groups one Finish looks at, so the summary and the one-off's end still have their time (K20).
+SWEEP_GROUPS = 10
+SWEEP_SECONDS = 60
 RED = ("failed", "timed_out", "orphaned", "interrupted")
 
 
@@ -320,20 +323,30 @@ def _file(root, rel, entry, counts):
     return f
 
 
-def _clean_group(group, job, registry, project, warnings):
-    """K10: clean the worktree group this job created — and only one whose manifest names this job, never a name another batch holds — removing a worktree that holds nothing and releasing the name. Returns what the summary says of it; failures go to `warnings`."""
+def _clean_group(group, job, registry, project, warnings, landed=None):
+    """K10: clean the worktree group this job created — and only one whose manifest names this job, never a name another batch holds — removing a worktree that holds nothing, or whose work `landed` says is on GitHub (K30), and releasing the name. A group that stays is marked finished, so a later job's Finish may look at it again (`_sweep`). Returns what the summary says of it; failures go to `warnings`."""
     if not group or group not in {g["name"] for g in list_groups(registry)}:
         return {}
     try:
         if (group_view(registry, group).get("origin") or {}).get("job") != job:
             return {}
-        result = clean(name=group, cwd=project, runs_dir=registry)
-    except Refusal as e:
-        warnings.append(f"The worktree was not cleaned up ({e.message}); `{invocation('clean', '--group', group, '--project', project)}` does it.")
+    except Refusal:
         return {}
+    try:
+        result = clean(name=group, cwd=project, runs_dir=registry, landed=landed)
+    except Exception as e:  # K20: a cleanup that fails is a warning; the summary must still be written.
+        warnings.append(f"The worktree was not cleaned up ({getattr(e, 'message', None) or e}); `{invocation('clean', '--group', group, '--project', project)}` does it.")
+        return {}
+    finally:
+        # This job's own group only: from now on a later job's Finish may look at it (`_sweep`).
+        with contextlib.suppress(Refusal, OSError):
+            update_group(registry, group, {"finished_at": now()})
     if result["kept"]:
         k = result["kept"][0]
-        return {"kept": {"path": k["path"], "branch": k["branch"], "clean": invocation("clean", "--group", group, "--project", project)}}
+        return {"kept": {"path": k["path"], "branch": k["branch"], "clean": invocation("clean", "--group", group, "--project", project), "open_pr": k.get("open_pr"), "landed": k.get("landed"), "why": k.get("why")}}
+    went = next((r for r in result["removed"] if r.get("landed")), None)
+    if went:
+        return {"landed": went}
     kept_branch = next((r["branch_kept"] for r in result["removed"] if r.get("branch_kept")), None)
     if kept_branch:
         return {"branch_kept": {"branch": kept_branch}}
@@ -425,6 +438,52 @@ def _bring_local(spec, ctx, registry, run_id, unconfirmed):
         return left_alone(spec["project"], f"the update could not be tried: {getattr(e, 'message', None) or repr(e)}") | {"status": "failed"}
 
 
+def _landed(spec, ctx, registry, local):
+    """K30: the question `clean` asks of a worktree's last commit — is it on GitHub? — answered from GitHub's default branch as this job fetched it (fetched now if the update did not, as under --no-pull) and from the pull requests whose head it is. None when GitHub's default branch is not known here."""
+    branch, remote = local.get("branch"), local.get("to")
+    if not remote:
+        with contextlib.suppress(Exception):
+            fetched = sync_local(spec["project"], registry, expect_repo=ctx.get("repository"), fetch_only=True)
+            branch, remote = fetched.get("branch"), fetched.get("to")
+    repo, project = ctx.get("repository"), spec["project"]
+    if not branch or not repo:
+        return None
+
+    def landed(head):
+        if remote and contains(project, remote, head, env=scrub_job_env(os.environ)):
+            return {"landed": True, "label": f"on {branch}", "default": branch}
+        found = pull_evidence(repo, head, branch)
+        if found["kind"] == "merged":
+            return {"landed": True, "label": f"#{found['number']}", "pr": found["number"], "default": branch}
+        if found["kind"] == "open":
+            return {"landed": False, "open_pr": found["number"]}
+        return None
+
+    return landed
+
+
+def _sweep(registry, project, repo, landed, own):
+    """K30: the worktree groups earlier jobs of this repository's schedules left — only those whose own Finish marked them finished, never a group being started or still live (`clean` refuses those) or one a person made — looked at again, so a pull request merged after its run ended still gets its worktree cleaned. Returns notes for the summary."""
+    if not landed:
+        return []
+    notes, started = [], time.monotonic()
+    waiting = [g for g in list_groups(registry) if g.get("name") != own and g.get("finished_at") and (g.get("origin") or {}).get("kind") == "schedule" and ((g.get("origin") or {}).get("repository") or "").lower() == (repo or "").lower()]
+    for n, g in enumerate(waiting):
+        if n >= SWEEP_GROUPS or time.monotonic() - started > SWEEP_SECONDS:
+            notes.append(f"{len(waiting) - n} earlier worktree group(s) were left for a later run's end to look at.")
+            break
+        try:
+            # Not one that changed after its own Finish: someone may be working in it, as its summary suggested (`claude --resume` there).
+            result = clean(name=g["name"], cwd=project, runs_dir=registry, landed=landed, untouched_since=g.get("finished_at"))
+            notes += [f"An earlier run's worktree {code_span(r['path'])} went: {went_text(r)}." for r in result["removed"] if r.get("landed")]
+            notes += [f"An earlier run's worktree {code_span(k['path'])} is kept: its work is on GitHub ({k['landed']}), but {k['why']}." for k in result["kept"] if k.get("landed") and k.get("why")]
+        except Refusal:  # live or starting: not this time
+            continue
+        except Exception as e:  # K20: said, not raised
+            notes.append(f"The earlier worktree group {code_span(g['name'])} could not be looked at: {e!r}.")
+    return notes
+
+
 def scheduled_finish(spec, env, write):
     """The Finish step, run after any end of the job (K20): stop a worker still alive, read what changed, clean up a worktree that holds nothing, keep the summary beside the run and post it to the job. Returns 1 only when the worker could not be confirmed stopped or the step summary could not be written; every other failure is a warning in the summary."""
     step = Step(write)
@@ -504,10 +563,15 @@ def scheduled_finish(spec, env, write):
             update_meta(run_dir, lambda m: m.__setitem__("changes_read_at", now()))
     # After the changes are read, so what comes in from GitHub is not counted as the run's (K27).
     local = _bring_local(spec, ctx, registry, run_id, unconfirmed)
+    landed = None
+    with contextlib.suppress(Exception):
+        landed = _landed(spec, ctx, registry, local)
     if changes is not None:
-        changes.update(_clean_group(rec.get("group"), job, registry, project, warnings))
+        changes.update(_clean_group(rec.get("group"), job, registry, project, warnings, landed))
     notes, ended = _end_one_off(spec, ctx, registry, rec, (meta or {}).get("state"))
     warnings += ended
+    with contextlib.suppress(Exception):
+        notes += _sweep(registry, project, ctx.get("repository"), landed, rec.get("group"))
     if unconfirmed:
         warnings.insert(0, f"**The worker could not be confirmed stopped:** {unconfirmed}. Check this Mac, and `{invocation('stop', '--run', run_id, '--project', project)}`.")
     rel = os.path.relpath(run_dir, project)

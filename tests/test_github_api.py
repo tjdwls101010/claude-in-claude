@@ -104,3 +104,45 @@ class Listing(FakeGitHub):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PullEvidence(FakeGitHub):
+    """What GitHub says of a worktree's last commit: merged into the default branch only when a pull request whose head is exactly that commit was."""
+
+    SHA = "bdf961fb931ff5b89a1e39911ff22b578b2811b2"
+
+    def pulls(self, *pulls, unknown=()):
+        w = self.world()
+        w["repos"][REPO]["pulls"] = list(pulls)
+        w["repos"][REPO]["unknown_commits"] = list(unknown)
+        self.world(w)
+
+    def test_merged_into_the_default_branch(self):
+        self.pulls({"number": 204, "head": self.SHA, "state": "closed", "merged": True})
+        self.assertEqual(github.pull_evidence(REPO, self.SHA, "main"), {"kind": "merged", "number": 204, "url": f"https://github.com/{REPO}/pull/204"})
+
+    def test_open(self):
+        self.pulls({"number": 205, "head": self.SHA, "state": "open"})
+        self.assertEqual(github.pull_evidence(REPO, self.SHA, "main"), {"kind": "open", "number": 205, "url": f"https://github.com/{REPO}/pull/205"})
+
+    def test_merged_elsewhere_or_closed_unmerged_is_not_landed(self):
+        for pr in ({"number": 1, "head": self.SHA, "state": "closed", "merged": True, "base": "release"}, {"number": 2, "head": self.SHA, "state": "closed", "merged": True, "base_repo": "fork/project"}, {"number": 3, "head": self.SHA, "state": "closed"}):
+            with self.subTest(pr=pr["number"]):
+                self.pulls(pr)
+                self.assertEqual(github.pull_evidence(REPO, self.SHA, "main")["kind"], "other")
+
+    def test_a_commit_no_pull_request_has_as_its_head(self):
+        self.pulls({"number": 204, "head": "0" * 40, "state": "closed", "merged": True})
+        self.assertEqual(github.pull_evidence(REPO, self.SHA, "main"), {"kind": "none"})
+
+    def test_a_commit_github_does_not_have(self):
+        self.pulls(unknown=[self.SHA])
+        self.assertEqual(github.pull_evidence(REPO, self.SHA, "main"), {"kind": "none"})
+
+    def test_github_cannot_be_asked(self):
+        w = self.world()
+        w["repos"] = {}
+        self.world(w)
+        got = github.pull_evidence(REPO, self.SHA, "main")
+        self.assertEqual(got["kind"], "unknown")
+        self.assertTrue(got["error"])
