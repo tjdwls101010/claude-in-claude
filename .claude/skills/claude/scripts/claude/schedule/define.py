@@ -8,7 +8,7 @@ from pathlib import Path
 
 from claude.errors import Refusal
 from claude.git import branch_contains, main_checkout, remote_url, toplevel
-from claude.github import GitHubError, delete_workflow, gh_status, legacy_workflow_file, list_workflow_files, local_runners, parse_spec, read_workflow, render_workflow, repo_facts, repo_from_remote, reserved_name, runner_problems, runners, set_workflow_enabled, workflow_file, workflow_state, workflow_states, write_workflow
+from claude.github import GitHubError, delete_workflow, gh_status, legacy_workflow_file, list_workflow_files, local_runners, parse_spec, read_workflow, render_workflow, repo_facts, repo_from_remote, reserved_name, runner_problems, runners, scrub_job_env, set_workflow_enabled, workflow_file, workflow_state, workflow_states, write_workflow
 from claude.launchd import agent_state, agents_dir, calendar_entries, install_agent, label_problem, list_agents, remove_agent, render_agent, supported, system_timezone
 from claude.registry import latest_job, read_meta, remove_schedule_state, resolve_runs_dir, schedule_dir, schedule_lock, schedule_runs_live, schedule_state_holder, write_definition
 from claude.runs import refuse_inside_worker
@@ -117,10 +117,10 @@ def _local(project, registry, repo, commit=None):
     """K30: the checkout brought up to the default branch this command just committed to (or, when it committed nothing, to whatever is there, so a call repeated after an update left undone completes it), by the rules a run's end follows; with `contains_commit` when it committed. A failed update is said here and is not the command's failure: the commit is made."""
     try:
         local = sync_local(project, registry, expect_repo=repo)
-    except (OSError, Refusal) as e:
-        local = left_alone(project, f"the update could not be tried: {getattr(e, 'message', None) or e}") | {"status": "failed"}
+    except Exception as e:  # the commit is made; what is left undone is said, not raised
+        local = left_alone(project, f"the update could not be tried: {getattr(e, 'message', None) or repr(e)}") | {"status": "failed"}
     if commit:
-        local["contains_commit"] = branch_contains(local["path"], local.get("branch"), commit)
+        local["contains_commit"] = branch_contains(local["path"], local.get("branch"), commit, env=scrub_job_env(os.environ))
     return local
 
 

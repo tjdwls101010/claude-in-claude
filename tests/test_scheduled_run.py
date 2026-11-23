@@ -504,7 +504,7 @@ class LocalCheckout(Job):
         warning = summary.split("[!WARNING]", 1)[1].split("\n\n", 1)[0]
         self.assertIn("Your checkout was not updated from GitHub", warning)
         self.assertIn("`README.md`", warning)
-        self.assertIn("merge --ff-only origin/main", warning)
+        self.assertIn("merge --ff-only --no-overwrite-ignore origin/main", warning)
         self.assertIn("::warning title=nightly%3A checkout not updated::", finish.stdout)
 
     def test_a_run_working_in_the_checkout_holds_the_update(self):
@@ -540,6 +540,31 @@ class LocalCheckout(Job):
         finish = self.step("finish", env)
         self.assertEqual(finish.returncode, 1)
         self.assertEqual(self.head(), before)
+
+    def test_a_run_whose_finish_has_not_read_its_changes_holds_the_update(self):
+        # Codex review LS07: another job's end between this run's end and its Finish must not slip GitHub's commits into this run's changes.
+        mine = self.job_env(prompt="x [[fake:write:new.txt]]")
+        self.assertEqual(self.step("run", mine).returncode, 0)
+        sha = self.land({"theirs.md": "t\n"})
+        other = self.job_env(run_id="44006368999", prompt="x")
+        before = self.head()
+        self.job(other, worktree=True, name="other")
+        self.assertEqual(self.head(), before, "the other job's end left the checkout alone")
+        self.assertIn("has not read", Path(other["GITHUB_STEP_SUMMARY"]).read_text())
+        self.step("finish", mine)
+        summary = Path(mine["GITHUB_STEP_SUMMARY"]).read_text()
+        changes = summary.split("<b>Changes</b>", 1)[1].split("</details>", 1)[0]
+        self.assertNotIn("theirs.md", changes)
+        self.assertNotIn("HEAD moved", changes)
+        self.assertEqual(self.head(), sha, "its own Finish then brings it in")
+
+    def test_a_commit_message_in_another_encoding_does_not_cost_the_summary(self):
+        # Codex review LS06: a repository's log encoding made git print bytes that are not UTF-8, and Finish ended with no summary.
+        git(self.project, "config", "i18n.logOutputEncoding", "ISO-8859-1")
+        run, finish, summary, sha = self.merged_during(self.job_env(prompt="x"), {"theirs.md": "t\n"}, "docs: café", worktree=True)
+        self.assertEqual(finish.returncode, 0, finish.stdout + finish.stderr)
+        self.assertEqual(self.head(), sha)
+        self.assertIn("café", summary.split("<b>From GitHub</b>", 1)[1])
 
     def test_no_pull_leaves_the_checkout(self):
         before = self.head()

@@ -409,7 +409,7 @@ class Local(Scheduling):
         self.assertEqual(reply["workflow"]["status"], "committed")
         local = reply["local"]
         self.assertEqual((local["status"], local["files"], local["contains_commit"]), ("not_updated", [".github/workflows/nightly.yml"], False))
-        self.assertIn("merge --ff-only origin/main", local["instead"])
+        self.assertIn("merge --ff-only --no-overwrite-ignore origin/main", local["instead"])
         self.assertEqual(self.head(), before)
         self.assertEqual(mine.read_text(), "mine\n")
 

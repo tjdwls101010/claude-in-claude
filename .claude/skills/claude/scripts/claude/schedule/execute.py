@@ -406,8 +406,8 @@ def _bring_local(spec, ctx, registry, run_id, unconfirmed):
         return left_alone(spec["project"], "the worker works in this checkout and could not be confirmed stopped")
     try:
         return sync_local(spec["project"], registry, expect_repo=ctx.get("repository"), skip_run=run_id)
-    except (OSError, Refusal) as e:
-        return left_alone(spec["project"], f"the update could not be tried: {getattr(e, 'message', None) or e}") | {"status": "failed"}
+    except Exception as e:  # K20: a stage that fails becomes a warning; the summary must still be written.
+        return left_alone(spec["project"], f"the update could not be tried: {getattr(e, 'message', None) or repr(e)}") | {"status": "failed"}
 
 
 def scheduled_finish(spec, env, write):
@@ -465,8 +465,11 @@ def scheduled_finish(spec, env, write):
             stop(refs=[run_id], cwd=project, runs_dir=registry)
         except Refusal as e:
             warnings.append(f"Stopping the worker failed: {e.message}")
-        meta = reap(run_dir)
-        if is_live(meta) or claude_alive(meta):
+        try:
+            meta = reap(run_dir)
+        except Refusal as e:
+            meta, unconfirmed = None, f"its meta.json cannot be read after stop ({e.message}), so whether the worker still runs is unknown"
+        if meta is not None and (is_live(meta) or claude_alive(meta)):
             unconfirmed = f"run {run_id} is still {meta.get('state')} after stop"
     snap = None
     if meta is not None:
